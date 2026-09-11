@@ -3,8 +3,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog,
                              QPushButton, QComboBox, QColorDialog, QLabel, QCheckBox, 
                              QDialog, QVBoxLayout, QHBoxLayout, QDoubleSpinBox, QSpinBox, 
                              QFormLayout, QTabWidget, QDialogButtonBox, QTableWidget, 
-                             QTableWidgetItem, QMessageBox, QWidget, QLineEdit, QGraphicsTextItem)
-from PyQt6.QtGui import QAction, QPageSize, QPageLayout, QKeySequence
+                             QTableWidgetItem, QMessageBox, QWidget, QLineEdit, QGraphicsTextItem,
+                             QInputDialog)
+from PyQt6.QtGui import QAction, QPageSize, QPageLayout, QKeySequence, QColor, QFont
 from PyQt6.QtCore import Qt
 from canvas import CADCanvas
 
@@ -383,12 +384,13 @@ class LayerManagerDialog(QDialog):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.canvas = canvas
-        self.setWindowTitle("レイヤープロパティ管理"); self.setGeometry(100, 100, 650, 350)
+        self.setWindowTitle("レイヤープロパティ管理")
+        self.setGeometry(100, 100, 750, 350)
         layout = QVBoxLayout()
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["現在", "レイヤー名", "表示 💡", "ロック 🔒", "印刷 🖨️", "色", "太さ"])
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(["現在", "レイヤー名", "表示 💡", "ロック 🔒", "印刷 🖨️", "色", "太さ", "線種"])
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
@@ -425,6 +427,14 @@ class LayerManagerDialog(QDialog):
             thick_spin = QSpinBox(); thick_spin.setRange(1, 20); thick_spin.setValue(props["thickness"])
             self.table.setCellWidget(row, 6, thick_spin)
 
+            style_combo = QComboBox()
+            style_combo.addItem("実線", Qt.PenStyle.SolidLine)
+            style_combo.addItem("破線", Qt.PenStyle.DashLine)
+            style_combo.addItem("点線", Qt.PenStyle.DotLine)
+            idx_s = style_combo.findData(props.get("style", Qt.PenStyle.SolidLine))
+            if idx_s >= 0: style_combo.setCurrentIndex(idx_s)
+            self.table.setCellWidget(row, 7, style_combo)
+
     def pick_color(self, row):
         btn = self.table.cellWidget(row, 5)
         current_color = QColor(btn.styleSheet().split(":")[1].split(";")[0].strip())
@@ -455,10 +465,11 @@ class LayerManagerDialog(QDialog):
             locked = self.table.cellWidget(row, 3).layout().itemAt(0).widget().isChecked()
             printable = self.table.cellWidget(row, 4).layout().itemAt(0).widget().isChecked()
             thickness = self.table.cellWidget(row, 6).value()
+            style = self.table.cellWidget(row, 7).currentData()
 
             new_layers[name] = {
                 "color": QColor(c_name), "thickness": thickness, 
-                "style": Qt.PenStyle.SolidLine, "visible": visible, 
+                "style": style, "visible": visible, 
                 "locked": locked, "printable": printable
             }
 
@@ -715,6 +726,27 @@ class MainWindow(QMainWindow):
         zo = QPushButton("🔍ー"); zo.clicked.connect(self.canvas.zoom_out); toolbar.addWidget(zo)
         zf = QPushButton("🔲 全体"); zf.clicked.connect(self.canvas.zoom_fit); toolbar.addWidget(zf)
 
+        # 初回の属性同期
+        self.sync_toolbar_with_active_layer()
+
+    def sync_toolbar_with_active_layer(self):
+        """アクティブレイヤーの属性（色・太さ・線種）をツールバーUIへ即座に反映"""
+        props = self.canvas.layers.get(self.canvas.active_layer, self.canvas.layers["0"])
+        
+        self.update_color_button_style(props["color"])
+        
+        idx_t = self.thickness_combo.findData(props["thickness"])
+        if idx_t >= 0:
+            self.thickness_combo.blockSignals(True)
+            self.thickness_combo.setCurrentIndex(idx_t)
+            self.thickness_combo.blockSignals(False)
+            
+        idx_s = self.style_combo.findData(props["style"])
+        if idx_s >= 0:
+            self.style_combo.blockSignals(True)
+            self.style_combo.setCurrentIndex(idx_s)
+            self.style_combo.blockSignals(False)
+
     def open_jww_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Jw_cadファイルを開く", "", "Jw_cad Files (*.jww *.jws)")
         if path: self.canvas.import_jww_file(path)
@@ -767,11 +799,15 @@ class MainWindow(QMainWindow):
 
     def on_layer_changed(self, idx):
         l_name = self.layer_combo.itemData(idx)
-        if l_name: self.canvas.set_active_layer(l_name)
+        if l_name:
+            self.canvas.set_active_layer(l_name)
+            self.sync_toolbar_with_active_layer()
 
     def open_layer_manager(self):
         d = LayerManagerDialog(self.canvas, self)
-        if d.exec() == QDialog.DialogCode.Accepted: self.refresh_layer_combo()
+        if d.exec() == QDialog.DialogCode.Accepted:
+            self.refresh_layer_combo()
+            self.sync_toolbar_with_active_layer()
 
     def open_create_block_dialog(self):
         if not self.canvas.scene.selectedItems():

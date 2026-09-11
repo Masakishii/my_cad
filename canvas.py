@@ -162,10 +162,13 @@ class CADCanvas(QGraphicsView):
             ]
         }
 
-    # --- 表示色（7番色/ダークモード自動反転） ---
+    # --- 表示色（7番色/ダークモード自動反転・コントラスト補正） ---
     def get_display_color(self, raw_color, is_export=False):
+        """黒背景時に黒色・暗色を画面上だけ視認性の高い白に補正"""
         if not is_export and self.is_dark_mode:
-            if raw_color == QColor(0, 0, 0) or raw_color.name() == "#000000":
+            # 輝度(Luminance)計算：暗い色（輝度100未満）なら画面表示のみ白にする
+            lum = 0.299 * raw_color.red() + 0.587 * raw_color.green() + 0.114 * raw_color.blue()
+            if lum < 100:
                 return QColor(255, 255, 255)
         return raw_color
 
@@ -193,26 +196,49 @@ class CADCanvas(QGraphicsView):
         elif bg_type == "GRAY":
             self.setBackgroundBrush(QBrush(QColor(220, 220, 220)))
             self.is_dark_mode = False
-        self.refresh_display_colors(is_export=False)
+        self.apply_layer_states(is_export=False)
 
-    # --- レイヤー管理 ---
+    # --- レイヤー管理 ＆ 連動ロジック ---
     def set_active_layer(self, layer_name):
+        """アクティブレイヤーを切り替え、デフォルト作図属性（色・太さ・線種）を自動同期"""
         if layer_name in self.layers:
             self.active_layer = layer_name
+            props = self.layers[layer_name]
+            self.current_color = props["color"]
+            self.current_thickness = props["thickness"]
+            self.current_style = props["style"]
 
     def apply_layer_states(self, is_export=False):
+        """全レイヤーの「表示/非表示」「ロック」「印刷対象」および「色・太さ・線種」を全オブジェクトへ一括反映"""
         for shape, item in zip(self.shapes, [i for i in self.scene.items() if i != self.paper_guide_item and i != getattr(self, 'custom_print_rect_item', None)]):
             layer_name = shape.get("layer", "0")
             props = self.layers.get(layer_name, self.layers["0"])
 
+            # 1. 表示 / 印刷非表示の制御
             if is_export:
                 item.setVisible(props["visible"] and props["printable"])
             else:
                 item.setVisible(props["visible"])
 
+            # 2. ロック（選択・移動許可）の制御
             is_movable = (self.mode == "SELECT" and not props["locked"])
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_movable)
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_movable)
+
+            # 3. レイヤープロパティ（色・太さ・線種）を図形データおよび描画ペンへ連動
+            shape["color"] = props["color"]
+            disp_color = self.get_display_color(props["color"], is_export=is_export)
+
+            if hasattr(item, "pen") and hasattr(item, "setPen"):
+                pen = item.pen()
+                pen.setColor(disp_color)
+                pen.setWidth(props["thickness"])
+                pen.setStyle(props["style"])
+                item.setPen(pen)
+                if hasattr(item, "brush") and hasattr(item, "setBrush") and item.brush().style() != Qt.BrushStyle.NoBrush:
+                    item.setBrush(QBrush(disp_color))
+            elif isinstance(item, QGraphicsTextItem):
+                item.setDefaultTextColor(disp_color)
 
         self.refresh_display_colors(is_export=is_export)
 
@@ -638,7 +664,7 @@ class CADCanvas(QGraphicsView):
         elif isinstance(item, QGraphicsRectItem): new_item = self.scene.addRect(item.rect(), pen, brush)
         elif isinstance(item, QGraphicsEllipseItem): new_item = self.scene.addEllipse(item.rect(), pen, brush)
         elif isinstance(item, QGraphicsPolygonItem): new_item = self.scene.addPolygon(item.polygon(), pen, brush)
-        elif isinstance(item, QGraphicsPathItem): new_item = self.scene.addPath(item.path(), pen, brush)
+        elif isinstance(item, QGraphicsPathItem): new_item = self.scene.addPath(item.path(), pen)
         elif isinstance(item, QGraphicsTextItem):
             new_item = self.scene.addText(item.toPlainText(), item.font())
             new_item.setDefaultTextColor(item.defaultTextColor())
