@@ -1,0 +1,2 @@
+# GitHubにはアップロードされないローカル専用の設定ファイル
+DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1547902334904827904/Uu1CVTefnQ0u4s0tE2ged8wb-_jkqwoMkI20MyeFHAHPHJYbfbjuBAVVQalyo10_R151"
