@@ -5,7 +5,7 @@ import pymupdf
 import ezdxf
 
 from PyQt6.QtWidgets import QFileDialog, QMessageBox, QGraphicsPixmapItem
-from PyQt6.QtGui import QColor, QImage, QPixmap, QPainter, QPageSize, QPageLayout, QPen
+from PyQt6.QtGui import QColor, QImage, QPixmap, QPainter, QPageSize, QPageLayout, QPen, QPainterPath
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtCore import Qt, QPointF, QRectF
 
@@ -46,11 +46,19 @@ class IOMixin:
                 if stype == "line": self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
                 elif stype == "rect": x1, y1, x2, y2 = s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1]; self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen)
                 elif stype == "circle": cx, cy, r = s["center"][0], s["center"][1], s["radius"]; self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
+                elif stype == "arc":
+                    cx, cy, r, st, sp = s["center"][0], s["center"][1], s["radius"], s["start_angle"], s["span_angle"]
+                    path = QPainterPath(); path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, sp)
+                    self.scene.addPath(path, pen)
                 elif stype == "polyline":
                     pts = [QPointF(pt[0], pt[1]) for pt in s["points"]]
                     if s.get("is_closed"): self.scene.addPolygon(pts, pen)
                     else:
-                        path = self.scene.addPath(QPainterPath()) # 補正用
+                        path = QPainterPath(); path.moveTo(pts[0])
+                        for pt in pts[1:]: path.lineTo(pt)
+                        self.scene.addPath(path, pen)
+                elif stype == "text":
+                    t = self.scene.addText(s["text"]); t.setDefaultTextColor(color); t.setFont(QFont("Meiryo", s.get("font_size", 12))); t.setPos(s["pos"][0], s["pos"][1])
                 self.shapes.append(s)
             self.apply_layer_states()
             QMessageBox.information(self, "成功", f"プロジェクトを読み込みました:\n{file_path}")

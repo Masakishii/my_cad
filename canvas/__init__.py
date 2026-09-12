@@ -1,3 +1,3 @@
-from canvas.base import CADCanvas
+from canvas.main_canvas import CADCanvas
 
 __all__ = ["CADCanvas"]
