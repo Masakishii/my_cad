@@ -1,9 +1,8 @@
 import math
-from shapely.geometry import Point, LineString, MultiPoint
-from shapely.ops import split, snap
+from shapely.geometry import Point, LineString
 
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QMessageBox, QGraphicsPixmapItem, QApplication, QInputDialog
-from PyQt6.QtGui import QColor, QFont, QPen, QBrush, QPageSize, QPageLayout, QPainterPath
+from PyQt6.QtGui import QColor, QFont, QPen, QBrush, QPageSize, QPageLayout, QPainterPath, QPolygonF
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 
 from canvas.base import CADCanvasBase
@@ -11,7 +10,7 @@ from canvas.geometry import GeometryMixin
 from canvas.io_manager import IOMixin
 
 class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
-    """統合 CADCanvas メインクラス"""
+    """全機能統合 CADCanvas メインクラス"""
 
     mode_changed = pyqtSignal(str)
 
@@ -107,6 +106,21 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
         self.angle_dim_first_line = None
         self.setMouseTracking(mode in ["TRIM", "BREAK", "TRACE_CALIBRATE", "FILLET"])
 
+        # 選択図形に対して即時実行する変形・変換コマンド
+        if mode in ["ROTATE", "SCALE", "MIRROR", "OFFSET", "ARRAY"]:
+            self.mode = mode
+            self.execute_edit_command()
+            self.set_mode("SELECT")
+            return
+        elif mode == "HATCH":
+            self.apply_hatching()
+            self.set_mode("SELECT")
+            return
+        elif mode == "CLOUD_OBJECT":
+            self.convert_selected_to_cloud()
+            self.set_mode("SELECT")
+            return
+
         if mode == "TRACE_CALIBRATE":
             selected = self.scene.selectedItems()
             pixmaps = [i for i in selected if isinstance(i, QGraphicsPixmapItem)] or [i for i in self.scene.items() if isinstance(i, QGraphicsPixmapItem)]
@@ -175,8 +189,28 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
         raw_pos = self.mapToScene(event.pos())
         pos = self.get_snapped_pos(raw_pos)
 
-        # 各種専用ツールのマウスダウン処理
-        if self.mode == "FILLET" and event.button() == Qt.MouseButton.LeftButton:
+        # 1点クリックで作図・入力完了するツール
+        if self.mode == "POINT" and event.button() == Qt.MouseButton.LeftButton:
+            disp_color = self.get_display_color(self.current_color)
+            pen = QPen(disp_color, self.current_thickness, self.current_style)
+            r = max(2.0, self.current_thickness)
+            self.scene.addEllipse(pos.x() - r, pos.y() - r, 2 * r, 2 * r, pen, QBrush(disp_color))
+            self.shapes.append({"type": "point", "pos": (pos.x(), pos.y()), "layer": self.active_layer, "color": self.current_color})
+            self.commit_history_record(); return
+
+        elif self.mode == "TEXT" and event.button() == Qt.MouseButton.LeftButton:
+            input_txt, ok = QInputDialog.getText(self, "文章入力", "挿入するテキスト:")
+            if ok and input_txt.strip():
+                disp_color = self.get_display_color(self.current_color)
+                t_item = self.scene.addText(input_txt.strip())
+                t_item.setDefaultTextColor(disp_color)
+                t_item.setFont(QFont("Meiryo", max(11, self.current_thickness * 4)))
+                t_item.setPos(pos)
+                self.shapes.append({"type": "text", "text": input_txt.strip(), "pos": (pos.x(), pos.y()), "font_size": 12, "layer": self.active_layer, "color": self.current_color})
+            self.set_mode("SELECT")
+            self.commit_history_record(); return
+
+        elif self.mode == "FILLET" and event.button() == Qt.MouseButton.LeftButton:
             self.execute_fillet_chamfer(pos)
             self.commit_history_record(); return
 
@@ -218,18 +252,20 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
                 self.set_mode("SELECT")
             self.commit_history_record(); return
 
-        elif self.mode in ["AUTO_TRACE", "PRINT_AREA"] and event.button() == Qt.MouseButton.LeftButton:
-            self.start_point = raw_pos
+        elif self.mode in ["AUTO_TRACE", "PRINT_AREA", "TRIM"] and event.button() == Qt.MouseButton.LeftButton:
+            if self.mode == "TRIM": self.trim_start_pos = raw_pos
+            else: self.start_point = raw_pos
             self.commit_history_record(); return
 
         elif self.mode == "SELECT" and event.button() == Qt.MouseButton.LeftButton:
             super().mousePressEvent(event); self.commit_history_record(); return
 
+        # 2点指定作図ツール（LINE, RECT, CIRCLE, DIMENSION, LEADER, CLOUDなど）
         if event.button() == Qt.MouseButton.LeftButton:
             disp_color = self.get_display_color(self.current_color)
             pen = QPen(disp_color, self.current_thickness, self.current_style)
 
-            if self.mode in ["LINE", "RECT", "CIRCLE", "DIMENSION", "DIM_RADIUS", "LEADER"]:
+            if self.mode in ["LINE", "RECT", "CIRCLE", "DIMENSION", "DIM_RADIUS", "LEADER", "CLOUD"]:
                 self.start_point = pos
 
             elif self.mode in ["ARC_3P", "ARC"]:
@@ -299,7 +335,7 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
 
         if getattr(self, 'start_point', None) and self.mode not in ["PRINT_AREA", "AUTO_TRACE"]:
             x1, y1, x2, y2 = self.start_point.x(), self.start_point.y(), current_pos.x(), current_pos.y()
-            if self.mode in ["LINE", "LEADER", "DIMENSION", "DIM_RADIUS"]:
+            if self.mode in ["LINE", "LEADER", "DIMENSION", "DIM_RADIUS", "CLOUD"]:
                 self.temp_item = self.scene.addLine(x1, y1, x2, y2, pen_preview)
             elif self.mode == "RECT":
                 self.temp_item = self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen_preview)
@@ -317,6 +353,8 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
         if event.button() == Qt.MouseButton.MiddleButton and self._is_panning:
             self._is_panning = False; self.setCursor(Qt.CursorShape.ArrowCursor)
             self.commit_history_record(); return
+
+        raw_pos = self.mapToScene(event.pos())
 
         # トリム・延長実行
         if self.mode == "TRIM" and event.button() == Qt.MouseButton.LeftButton:
@@ -358,9 +396,7 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
             super().mouseReleaseEvent(event)
             self.commit_history_record(); return
 
-        raw_pos = self.mapToScene(event.pos())
         end_point = self.get_snapped_pos(self.apply_angle_snap(self.start_point, raw_pos))
-        
         disp_color = self.get_display_color(self.current_color)
         pen = QPen(disp_color, self.current_thickness, self.current_style)
         x1, y1, x2, y2 = self.start_point.x(), self.start_point.y(), end_point.x(), end_point.y()
@@ -370,16 +406,51 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
         if self.mode == "LINE":
             self.scene.addLine(x1, y1, x2, y2, pen)
             self.shapes.append({"type": "line", "p1": (x1, y1), "p2": (x2, y2), "layer": self.active_layer, "color": self.current_color})
+
         elif self.mode == "RECT":
             rx, ry, rw, rh = min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2)
             self.scene.addRect(rx, ry, rw, rh, pen)
             self.shapes.append({"type": "rect", "p1": (rx, ry), "p2": (rx + rw, ry + rh), "layer": self.active_layer, "color": self.current_color})
+
         elif self.mode == "CIRCLE":
             r = math.hypot(x2 - x1, y2 - y1)
             self.scene.addEllipse(x1 - r, y1 - r, 2 * r, 2 * r, pen)
             self.shapes.append({"type": "circle", "center": (x1, y1), "radius": r, "layer": self.active_layer, "color": self.current_color})
+
+        elif self.mode == "DIMENSION":
+            dist = math.hypot(x2 - x1, y2 - y1) * self.scale_factor
+            val_str = f"{dist:.1f}"
+            self.scene.addLine(x1, y1, x2, y2, pen)
+            t_item = self.scene.addText(val_str)
+            t_item.setDefaultTextColor(disp_color)
+            t_item.setFont(QFont("Meiryo", max(10, self.current_thickness * 4)))
+            t_item.setPos((x1 + x2) / 2, (y1 + y2) / 2 - 15)
+            self.shapes.append({"type": "dimension", "p1": (x1, y1), "p2": (x2, y2), "val_str": val_str, "layer": self.active_layer, "color": self.current_color})
+
         elif self.mode == "LEADER":
             self.add_leader_with_auto_measure(self.start_point, end_point)
+
+        elif self.mode == "CLOUD":
+            # ドラッグ2点間で矩形雲マーク生成
+            rx, ry, rw, rh = min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2)
+            corners = [(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)]
+            pts = []
+            step = max(5.0, self.cloud_pitch)
+            for i in range(4):
+                p1, p2 = corners[i], corners[(i + 1) % 4]
+                length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                n = max(1, int(length / step))
+                for k in range(n): pts.append((p1[0] + (k / n) * (p2[0] - p1[0]), p1[1] + (k / n) * (p2[1] - p1[1])))
+            pts.append(corners[0])
+
+            cloud_path = QPainterPath(); cloud_path.moveTo(QPointF(pts[0][0], pts[0][1]))
+            for i in range(len(pts) - 1):
+                p1, p2 = pts[i], pts[i+1]
+                mx, my, dx, dy = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, p2[0] - p1[0], p2[1] - p1[1]
+                d_val = math.hypot(dx, dy)
+                if d_val > 0: cloud_path.quadTo(QPointF(mx + (dy / d_val) * self.cloud_arc_height, my + (-dx / d_val) * self.cloud_arc_height), QPointF(p2[0], p2[1]))
+            self.scene.addPath(cloud_path, pen)
+            self.shapes.append({"type": "polyline", "points": pts, "is_closed": True, "layer": self.active_layer, "color": self.current_color})
 
         self.start_point = None
         self.commit_history_record()
