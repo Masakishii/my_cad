@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog,
                              QInputDialog, QMenuBar)
 from PyQt6.QtGui import QAction, QPageSize, QPageLayout, QKeySequence, QColor, QFont
 from PyQt6.QtCore import Qt
-from old_canvas import CADCanvas
+from canvas import CADCanvas
 
 # secret.py からURLを読み込み（未作成時は安全にスルー）
 try:
