@@ -1,16 +1,15 @@
 import os
 import json
-import subprocess
 import pymupdf
 import ezdxf
 
 from PyQt6.QtWidgets import QFileDialog, QMessageBox, QGraphicsPixmapItem
-from PyQt6.QtGui import QColor, QImage, QPixmap, QPainter, QPageSize, QPageLayout, QPen, QPainterPath
+from PyQt6.QtGui import QColor, QImage, QPixmap, QPainter, QPageSize, QPageLayout, QPen, QFont, QPainterPath
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtCore import Qt, QPointF, QRectF
 
 class IOMixin:
-    """ファイル入出力・印刷・PDF出力管理 Mixin"""
+    """入出力・印刷・PDF・DXF・JWW関連メソッド"""
 
     def save_project_json(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "プロジェクトを保存", "", "CAD Project Files (*.json)")
@@ -18,27 +17,47 @@ class IOMixin:
         try:
             serializable_layers = {}
             for name, props in self.layers.items():
-                serializable_layers[name] = {"color": props["color"].name(), "thickness": props["thickness"], "style": int(props["style"]), "visible": props["visible"], "locked": props["locked"], "printable": props["printable"]}
+                serializable_layers[name] = {
+                    "color": props["color"].name(), "thickness": props["thickness"],
+                    "style": int(props["style"]), "visible": props["visible"],
+                    "locked": props["locked"], "printable": props["printable"]
+                }
             serializable_shapes = []
             for s in self.shapes:
                 s_copy = dict(s)
-                if "color" in s_copy and isinstance(s_copy["color"], QColor): s_copy["color"] = s_copy["color"].name()
+                if "color" in s_copy and isinstance(s_copy["color"], QColor):
+                    s_copy["color"] = s_copy["color"].name()
                 serializable_shapes.append(s_copy)
-            data = {"version": "1.0", "layers": serializable_layers, "blocks": self.blocks, "shapes": serializable_shapes, "paper_scale": self.paper_scale, "active_layer": self.active_layer}
-            with open(file_path, "w", encoding="utf-8") as f: json.dump(data, f, indent=4, ensure_ascii=False)
+            data = {
+                "version": "1.0", "layers": serializable_layers, "blocks": self.blocks,
+                "shapes": serializable_shapes, "paper_scale": self.paper_scale, "active_layer": self.active_layer
+            }
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
             QMessageBox.information(self, "成功", f"プロジェクトを保存しました:\n{file_path}")
-        except Exception as e: QMessageBox.critical(self, "エラー", f"保存失敗:\n{e}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"保存失敗:\n{e}")
 
     def load_project_json(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "プロジェクトを開く", "", "CAD Project Files (*.json)")
         if not file_path: return
         try:
-            with open(file_path, "r", encoding="utf-8") as f: data = json.load(f)
-            self.scene.clear(); self.shapes.clear(); self.paper_guide_item = None; self.custom_print_rect_item = None
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.scene.clear()
+            self.shapes.clear()
+            self.paper_guide_item = None
+            self.custom_print_rect_item = None
             self.layers.clear()
             for name, props in data.get("layers", {}).items():
-                self.layers[name] = {"color": QColor(props["color"]), "thickness": props["thickness"], "style": Qt.PenStyle(props["style"]), "visible": props["visible"], "locked": props["locked"], "printable": props["printable"]}
-            self.active_layer = data.get("active_layer", "0"); self.paper_scale = data.get("paper_scale", 100); self.blocks = data.get("blocks", {})
+                self.layers[name] = {
+                    "color": QColor(props["color"]), "thickness": props["thickness"],
+                    "style": Qt.PenStyle(props["style"]), "visible": props["visible"],
+                    "locked": props["locked"], "printable": props["printable"]
+                }
+            self.active_layer = data.get("active_layer", "0")
+            self.paper_scale = data.get("paper_scale", 100)
+            self.blocks = data.get("blocks", {})
             for s in data.get("shapes", []):
                 if "color" in s: s["color"] = QColor(s["color"])
                 stype, color = s.get("type"), self.get_display_color(s.get("color", self.current_color))
@@ -62,7 +81,8 @@ class IOMixin:
                 self.shapes.append(s)
             self.apply_layer_states()
             QMessageBox.information(self, "成功", f"プロジェクトを読み込みました:\n{file_path}")
-        except Exception as e: QMessageBox.critical(self, "エラー", f"読み込み失敗:\n{e}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"読み込み失敗:\n{e}")
 
     def save_to_dxf(self):
         self.finish_polyline()
@@ -94,7 +114,8 @@ class IOMixin:
 
             doc.saveas(file_path)
             QMessageBox.information(self, "成功", f"DXFファイルを保存しました:\n{file_path}")
-        except Exception as e: QMessageBox.critical(self, "エラー", f"DXF保存失敗:\n{e}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"DXF保存失敗:\n{e}")
 
     def import_jww_file(self, file_path):
         if not os.path.exists(file_path): return
@@ -110,7 +131,8 @@ class IOMixin:
                 self.layers[jww_layer_name] = {"color": QColor(0, 100, 200), "thickness": 2, "style": Qt.PenStyle.SolidLine, "visible": True, "locked": False, "printable": True}
             QMessageBox.information(self, "完了", f"JWW図面要素を取り込みました:\n{os.path.basename(file_path)}")
             self.commit_history_record()
-        except Exception as e: QMessageBox.critical(self, "エラー", f"JWW読み込み失敗:\n{e}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"JWW読み込み失敗:\n{e}")
 
     def set_background_file(self, file_path):
         if file_path.lower().endswith('.pdf'):

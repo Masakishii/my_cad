@@ -210,6 +210,36 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
             self.set_mode("SELECT")
             self.commit_history_record(); return
 
+        elif self.mode in ["PRESET_RECT", "PRESET_CIRCLE", "PRESET_ARC", "PRESET_POLYGON"] and event.button() == Qt.MouseButton.LeftButton:
+            disp_color = self.get_display_color(self.current_color)
+            pen = QPen(disp_color, self.current_thickness, self.current_style)
+            cx, cy = pos.x(), pos.y()
+            if self.mode == "PRESET_RECT":
+                w, h = self.preset_rect_w, self.preset_rect_h
+                self.scene.addRect(cx - w / 2, cy - h / 2, w, h, pen)
+                self.shapes.append({"type": "rect", "p1": (cx - w/2, cy - h/2), "p2": (cx + w/2, cy + h/2), "layer": self.active_layer, "color": self.current_color})
+            elif self.mode == "PRESET_CIRCLE":
+                r = self.preset_circle_r
+                self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
+                self.shapes.append({"type": "circle", "center": (cx, cy), "radius": r, "layer": self.active_layer, "color": self.current_color})
+            elif self.mode == "PRESET_ARC":
+                r, st, sp = self.preset_arc_r, self.preset_arc_start, self.preset_arc_span
+                path = QPainterPath(); path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, sp)
+                self.scene.addPath(path, pen)
+                self.shapes.append({"type": "arc", "center": (cx, cy), "radius": r, "start_angle": st, "span_angle": sp, "layer": self.active_layer, "color": self.current_color})
+            elif self.mode == "PRESET_POLYGON":
+                pts = self._calc_regular_polygon_points_by_angle(cx, cy, self.preset_poly_r, self.preset_poly_sides, self.preset_poly_angle)
+                self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in pts]), pen, QBrush(Qt.BrushStyle.NoBrush))
+                self.shapes.append({"type": "polyline", "points": pts, "is_closed": True, "layer": self.active_layer, "color": self.current_color})
+            self.set_mode("SELECT")
+            self.commit_history_record(); return
+
+        elif self.mode in ["CONCENTRIC_CIRCLE", "CONCENTRIC_RECT", "CONCENTRIC_POLYGON"] and event.button() == Qt.MouseButton.LeftButton:
+            stype = "CIRCLE" if self.mode == "CONCENTRIC_CIRCLE" else ("RECT" if self.mode == "CONCENTRIC_RECT" else "POLYGON")
+            self.generate_concentric_shapes(stype, 20.0, 20.0, False, 4, center=pos)
+            self.set_mode("SELECT")
+            self.commit_history_record(); return
+
         elif self.mode == "FILLET" and event.button() == Qt.MouseButton.LeftButton:
             self.execute_fillet_chamfer(pos)
             self.commit_history_record(); return
@@ -260,12 +290,12 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
         elif self.mode == "SELECT" and event.button() == Qt.MouseButton.LeftButton:
             super().mousePressEvent(event); self.commit_history_record(); return
 
-        # 2点指定作図ツール（LINE, RECT, CIRCLE, DIMENSION, LEADER, CLOUDなど）
+        # 2点指定作図ツール（LINE, H_LINE, V_LINE, RECT, CIRCLE, CIRCLE_2P, CIRCLE_3P, ELLIPSE, DIMENSION, DIM_RADIUS, LEADER, CLOUD, ARROWなど）
         if event.button() == Qt.MouseButton.LeftButton:
             disp_color = self.get_display_color(self.current_color)
             pen = QPen(disp_color, self.current_thickness, self.current_style)
 
-            if self.mode in ["LINE", "RECT", "CIRCLE", "DIMENSION", "DIM_RADIUS", "LEADER", "CLOUD"]:
+            if self.mode in ["LINE", "H_LINE", "V_LINE", "RECT", "CIRCLE", "CIRCLE_2P", "CIRCLE_3P", "ELLIPSE", "DIMENSION", "DIM_RADIUS", "LEADER", "CLOUD", "ARROW"]:
                 self.start_point = pos
 
             elif self.mode in ["ARC_3P", "ARC"]:
@@ -274,7 +304,7 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
                     if self.mode == "ARC_3P": self.create_3pt_arc()
                     elif self.mode == "ARC": self.create_center_arc()
 
-            elif self.mode in ["POLYLINE", "POLYGON", "SPLINE"]:
+            elif self.mode in ["POLYLINE", "POLYGON", "SPLINE", "REG_POLYGON"]:
                 last_pt = QPointF(self.poly_points[-1][0], self.poly_points[-1][1]) if self.poly_points else None
                 pos_angled = self.apply_angle_snap(last_pt, raw_pos) if last_pt else raw_pos
                 p = self.get_snapped_pos(pos_angled)
@@ -335,15 +365,19 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
 
         if getattr(self, 'start_point', None) and self.mode not in ["PRINT_AREA", "AUTO_TRACE"]:
             x1, y1, x2, y2 = self.start_point.x(), self.start_point.y(), current_pos.x(), current_pos.y()
-            if self.mode in ["LINE", "LEADER", "DIMENSION", "DIM_RADIUS", "CLOUD"]:
+            if self.mode in ["LINE", "LEADER", "DIMENSION", "DIM_RADIUS", "CLOUD", "ARROW"]:
                 self.temp_item = self.scene.addLine(x1, y1, x2, y2, pen_preview)
-            elif self.mode == "RECT":
+            elif self.mode == "H_LINE":
+                self.temp_item = self.scene.addLine(x1 - 5000, y1, x1 + 5000, y1, pen_preview)
+            elif self.mode == "V_LINE":
+                self.temp_item = self.scene.addLine(x1, y1 - 5000, x1, y1 + 5000, pen_preview)
+            elif self.mode in ["RECT", "ELLIPSE"]:
                 self.temp_item = self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen_preview)
-            elif self.mode == "CIRCLE":
+            elif self.mode in ["CIRCLE", "CIRCLE_2P"]:
                 r = math.hypot(x2 - x1, y2 - y1)
                 self.temp_item = self.scene.addEllipse(x1 - r, y1 - r, 2 * r, 2 * r, pen_preview)
 
-        elif self.mode in ["POLYLINE", "POLYGON", "SPLINE"] and len(self.poly_points) > 0:
+        elif self.mode in ["POLYLINE", "POLYGON", "SPLINE", "REG_POLYGON"] and len(self.poly_points) > 0:
             last_pt = QPointF(self.poly_points[-1][0], self.poly_points[-1][1])
             c_pos = self.get_snapped_pos(self.apply_angle_snap(last_pt, raw_pos))
             self.temp_item = self.scene.addLine(last_pt.x(), last_pt.y(), c_pos.x(), c_pos.y(), pen_preview)
@@ -407,15 +441,33 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
             self.scene.addLine(x1, y1, x2, y2, pen)
             self.shapes.append({"type": "line", "p1": (x1, y1), "p2": (x2, y2), "layer": self.active_layer, "color": self.current_color})
 
+        elif self.mode == "H_LINE":
+            self.scene.addLine(x1 - 5000, y1, x1 + 5000, y1, pen)
+            self.shapes.append({"type": "line", "p1": (x1 - 5000, y1), "p2": (x1 + 5000, y1), "layer": self.active_layer, "color": self.current_color})
+
+        elif self.mode == "V_LINE":
+            self.scene.addLine(x1, y1 - 5000, x1, y1 + 5000, pen)
+            self.shapes.append({"type": "line", "p1": (x1, y1 - 5000), "p2": (x1, y1 + 5000), "layer": self.active_layer, "color": self.current_color})
+
         elif self.mode == "RECT":
             rx, ry, rw, rh = min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2)
             self.scene.addRect(rx, ry, rw, rh, pen)
             self.shapes.append({"type": "rect", "p1": (rx, ry), "p2": (rx + rw, ry + rh), "layer": self.active_layer, "color": self.current_color})
 
-        elif self.mode == "CIRCLE":
+        elif self.mode in ["CIRCLE", "CIRCLE_2P"]:
             r = math.hypot(x2 - x1, y2 - y1)
             self.scene.addEllipse(x1 - r, y1 - r, 2 * r, 2 * r, pen)
             self.shapes.append({"type": "circle", "center": (x1, y1), "radius": r, "layer": self.active_layer, "color": self.current_color})
+
+        elif self.mode == "ELLIPSE":
+            rx, ry, rw, rh = min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2)
+            self.scene.addEllipse(rx, ry, rw, rh, pen)
+            self.shapes.append({"type": "ellipse", "center": (rx + rw/2, ry + rh/2), "rx": rw/2, "ry": rh/2, "layer": self.active_layer, "color": self.current_color})
+
+        elif self.mode == "ARROW":
+            self.scene.addLine(x1, y1, x2, y2, pen)
+            self._draw_arrow_head(QPointF(x2, y2), math.atan2(y2 - y1, x2 - x1))
+            self.shapes.append({"type": "arrow", "p1": (x1, y1), "p2": (x2, y2), "layer": self.active_layer, "color": self.current_color})
 
         elif self.mode == "DIMENSION":
             dist = math.hypot(x2 - x1, y2 - y1) * self.scale_factor
@@ -431,7 +483,6 @@ class CADCanvas(CADCanvasBase, GeometryMixin, IOMixin):
             self.add_leader_with_auto_measure(self.start_point, end_point)
 
         elif self.mode == "CLOUD":
-            # ドラッグ2点間で矩形雲マーク生成
             rx, ry, rw, rh = min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2)
             corners = [(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)]
             pts = []

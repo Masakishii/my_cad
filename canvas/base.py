@@ -7,7 +7,7 @@ from PyQt6.QtGui import QPen, QColor, QBrush, QFont, QPainterPath, QPolygonF
 from PyQt6.QtCore import Qt, QPointF
 
 class CADCanvasBase(QGraphicsView):
-    """CADCanvas の基底クラス（基本操作・履歴・属性・ブロック・グループ管理）"""
+    """基本共通操作・プロパティ・履歴・レイヤー・ブロック管理"""
 
     def __init__(self):
         pass
@@ -114,6 +114,9 @@ class CADCanvasBase(QGraphicsView):
     def set_style(self, style):
         self.current_style = style; self.apply_property_to_selected(style=style)
 
+    def set_cloud_pitch(self, pitch): self.cloud_pitch = pitch
+    def set_cloud_arc_height(self, height): self.cloud_arc_height = height
+
     def apply_property_to_selected(self, color=None, thickness=None, style=None):
         selected_items = self.scene.selectedItems()
         if not selected_items: return
@@ -143,7 +146,6 @@ class CADCanvasBase(QGraphicsView):
         snapped_deg = round(math.degrees(angle_rad) / 15.0) * 15.0
         return QPointF(p1.x() + dist * math.cos(math.radians(snapped_deg)), p1.y() + dist * math.sin(math.radians(snapped_deg)))
 
-    # --- グループ・ブロック・コンテキストメニュー操作 ---
     def group_selected_items(self):
         selected = self.scene.selectedItems()
         if len(selected) < 2:

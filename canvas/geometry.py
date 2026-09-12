@@ -3,11 +3,11 @@ from shapely.geometry import LineString, Point, Polygon, MultiPoint, GeometryCol
 from shapely.ops import split, snap
 
 from PyQt6.QtWidgets import QMessageBox, QInputDialog, QGraphicsEllipseItem, QGraphicsPixmapItem
-from PyQt6.QtGui import QPen, QColor, QPainterPath, QFont, QPolygonF, QBrush
+from PyQt6.QtGui import QPen, QColor, QPainterPath, QFont, QPolygonF, QBrush, QImage
 from PyQt6.QtCore import Qt, QPointF
 
 class GeometryMixin:
-    """幾何演算・スナップ・トリム・高度編集機能 Mixin"""
+    """幾何演算・スナップ・各種編集エンジン"""
 
     def set_otrack_enabled(self, enabled):
         self.otrack_enabled = enabled
@@ -25,11 +25,9 @@ class GeometryMixin:
             stype = shape.get("type")
             g = None
             if stype in ["line", "dimension", "arrow", "leader"]:
-                p1 = shape["p1"]
-                p2 = shape["p2"]
+                p1, p2 = shape["p1"], shape["p2"]
                 snaps.extend([
-                    (p1[0], p1[1], "END"),
-                    (p2[0], p2[1], "END"),
+                    (p1[0], p1[1], "END"), (p2[0], p2[1], "END"),
                     ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, "MID")
                 ])
                 g = LineString([p1, p2])
@@ -55,7 +53,6 @@ class GeometryMixin:
                 g = LineString(pts)
 
             if g is not None: geoms.append(g)
-
         return snaps
 
     def get_snapped_pos(self, raw_pos):
@@ -130,7 +127,6 @@ class GeometryMixin:
             self.snap_marker = self.scene.addRect(pos.x() - size/2, pos.y() - size/2, size, size, pen)
             self.snap_marker.setZValue(100)
 
-    # --- 結合 (JOIN) & 中心線生成 (CENTERLINE) ---
     def join_selected_lines(self):
         selected = self.scene.selectedItems()
         target_shapes = []
@@ -179,7 +175,6 @@ class GeometryMixin:
         self.commit_history_record()
         if count: QMessageBox.information(self, "完了", f"{count}個のオブジェクトに中心線を生成しました。")
 
-    # --- 変形・ハッチング・雲マーク変換 ---
     def execute_edit_command(self):
         selected = self.scene.selectedItems()
         if not selected: return
@@ -279,7 +274,6 @@ class GeometryMixin:
             self.scene.addPath(cloud_path, pen); self.safe_remove_item(item)
         self.commit_history_record()
 
-    # --- 自動測定・注釈生成 ---
     def calculate_shape_measurements(self, pos):
         click_pt = Point(pos.x(), pos.y())
         target_shape = None
@@ -504,8 +498,19 @@ class GeometryMixin:
             if shape_type == "CIRCLE":
                 self.scene.addEllipse(cx - current_r, cy - current_r, 2 * current_r, 2 * current_r, pen)
                 self.shapes.append({"type": "circle", "center": (cx, cy), "radius": current_r, "layer": self.active_layer, "color": self.current_color})
+            elif shape_type == "RECT":
+                self.scene.addRect(cx - current_r, cy - current_r, 2 * current_r, 2 * current_r, pen)
+                self.shapes.append({"type": "rect", "p1": (cx - current_r, cy - current_r), "p2": (cx + current_r, cy + current_r), "layer": self.active_layer, "color": self.current_color})
+            elif shape_type == "POLYGON":
+                pts = self._calc_regular_polygon_points_by_angle(cx, cy, current_r, sides, 0.0)
+                self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in pts]), pen, QBrush(Qt.BrushStyle.NoBrush))
+                self.shapes.append({"type": "polyline", "points": pts, "is_closed": True, "layer": self.active_layer, "color": self.current_color})
             current_r = current_r * step_val if is_multiplier else current_r + step_val
         self.commit_history_record()
+
+    def _calc_regular_polygon_points_by_angle(self, cx, cy, radius, sides, start_angle_deg):
+        base_angle = math.radians(start_angle_deg)
+        return [(cx + radius * math.cos(base_angle + 2 * math.pi * i / sides), cy + radius * math.sin(base_angle + 2 * math.pi * i / sides)) for i in range(sides)]
 
     def add_table_data(self, grid_data, cell_w, cell_h, pos):
         rows, cols = len(grid_data), max(len(r) for r in grid_data) if grid_data else 0
@@ -529,7 +534,7 @@ class GeometryMixin:
         target_pixmap_item = next((i for i in self.scene.items(rect) if isinstance(i, QGraphicsPixmapItem)), None)
         if not target_pixmap_item: return
         local_rect = target_pixmap_item.mapFromScene(rect).boundingRect()
-        image = target_pixmap_item.pixmap().toImage().convertToFormat(image.Format.Format_RGB888)
+        image = target_pixmap_item.pixmap().toImage().convertToFormat(QImage.Format.Format_RGB888)
         ix, iy = int(max(0, local_rect.x())), int(max(0, local_rect.y()))
         iw, ih = int(min(image.width() - ix, local_rect.width())), int(min(image.height() - iy, local_rect.height()))
         if iw <= 0 or ih <= 0: return
@@ -666,44 +671,4 @@ class GeometryMixin:
         
         self.shapes.append({"type": "line", "p1": s1["p1"], "p2": (px, py), "layer": s1.get("layer", self.active_layer), "color": s1.get("color", self.current_color)})
         self.shapes.append({"type": "line", "p1": (px, py), "p2": s2["p2"], "layer": s2.get("layer", self.active_layer), "color": s2.get("color", self.current_color)})
-        self.commit_history_record()
-
-    def break_shape_at_points(self, shape, pt1, pt2):
-        stype, color, layer = shape.get("type"), shape.get("color", self.current_color), shape.get("layer", self.active_layer)
-        pen = QPen(self.get_display_color(color), self.current_thickness, self.current_style)
-        p1_f, p2_f = QPointF(pt1.x(), pt1.y()), QPointF(pt2.x(), pt2.y())
-        is_single_point = math.hypot(p2_f.x() - p1_f.x(), p2_f.y() - p1_f.y()) < 5.0
-
-        self.start_history_record()
-        if shape in self.shapes: self.shapes.remove(shape)
-
-        if stype == "circle":
-            cx, cy, r = shape["center"][0], shape["center"][1], shape["radius"]
-            a1 = math.atan2(p1_f.y() - cy, p1_f.x() - cx)
-            a2 = math.atan2(p2_f.y() - cy, p2_f.x() - cx) if not is_single_point else a1 + math.radians(0.5)
-            deg1, deg2 = math.degrees(a1) % 360, math.degrees(a2) % 360
-            if deg1 <= deg2: deg1 += 360
-            span = deg1 - deg2
-            num_pts = max(16, int(span / 4.0))
-            arc_pts = [(cx + r * math.cos(math.radians(deg2 + (span * i / num_pts))), cy + r * math.sin(math.radians(deg2 + (span * i / num_pts)))) for i in range(num_pts + 1)]
-            self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in arc_pts]), pen, QBrush(Qt.BrushStyle.NoBrush))
-            self.shapes.append({"type": "polyline", "points": arc_pts, "is_closed": False, "layer": layer, "color": color})
-        else:
-            geom = self._shape_to_shapely(shape)
-            if geom:
-                pt1_g, pt2_g = Point(p1_f.x(), p1_f.y()), Point(p2_f.x(), p2_f.y())
-                cut_geom = pt1_g.buffer(0.1).boundary if is_single_point else MultiPoint([pt1_g, pt2_g])
-                snapped_g = snap(geom, cut_geom, 2.0)
-                split_res = split(snapped_g, cut_geom)
-                segs = list(split_res.geoms) if hasattr(split_res, 'geoms') else [split_res]
-                for seg in segs:
-                    if not is_single_point and (seg.distance(pt1_g) < 3.0 or seg.distance(pt2_g) < 3.0) and seg.length < math.hypot(p2_f.x() - p1_f.x(), p2_f.y() - p1_f.y()) * 1.2: continue
-                    coords = list(seg.coords)
-                    if len(coords) >= 2:
-                        if len(coords) == 2:
-                            self.scene.addLine(coords[0][0], coords[0][1], coords[1][0], coords[1][1], pen)
-                            self.shapes.append({"type": "line", "p1": coords[0], "p2": coords[1], "layer": layer, "color": color})
-                        else:
-                            self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in coords]), pen, QBrush(Qt.BrushStyle.NoBrush))
-                            self.shapes.append({"type": "polyline", "points": coords, "is_closed": False, "layer": layer, "color": color})
         self.commit_history_record()
