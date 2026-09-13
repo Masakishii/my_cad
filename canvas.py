@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QInputDialog, QMessa
                              QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem, 
                              QGraphicsItemGroup, QApplication, QMenu, QDialog,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QLabel, QComboBox, QDoubleSpinBox)
+                             QPushButton, QLabel, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit, QColorDialog)
 from PyQt6.QtGui import (QPen, QColor, QPixmap, QPolygonF, QBrush, QFont, QImage, 
                          QPainterPath, QPainter, QPageSize, QPageLayout)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
@@ -33,17 +33,75 @@ def _clean_for_json(obj):
         return [_clean_for_json(i) for i in obj]
     return obj
 
+class TextEditDialog(QDialog):
+    """文章入力・再編集用ダイアログ（改行・フォントサイズ・文字色対応）"""
+    def __init__(self, parent=None, text="", font_size=12, color=None):
+        super().__init__(parent)
+        self.setWindowTitle("文章の入力・編集")
+        self.resize(420, 350)
+
+        self.selected_color = QColor(color) if color else QColor(255, 0, 0)
+
+        layout = QVBoxLayout(self)
+
+        cfg_layout = QHBoxLayout()
+        cfg_layout.addWidget(QLabel("文字サイズ(pt):"))
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(6, 500)
+        self.size_spin.setValue(int(font_size))
+        cfg_layout.addWidget(self.size_spin)
+
+        cfg_layout.addWidget(QLabel("文字色:"))
+        self.color_btn = QPushButton(" 色を選択 ")
+        self.update_color_button_style()
+        self.color_btn.clicked.connect(self.choose_color)
+        cfg_layout.addWidget(self.color_btn)
+
+        cfg_layout.addStretch()
+        layout.addLayout(cfg_layout)
+
+        layout.addWidget(QLabel("テキスト (Enter / Shift+Enter で改行):"))
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(text)
+        layout.addWidget(self.text_edit)
+
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def choose_color(self):
+        col = QColorDialog.getColor(self.selected_color, self, "文字色の選択")
+        if col.isValid():
+            self.selected_color = col
+            self.update_color_button_style()
+
+    def update_color_button_style(self):
+        txt_col = "#000000" if (self.selected_color.red()*0.299 + self.selected_color.green()*0.587 + self.selected_color.blue()*0.114) > 180 else "#FFFFFF"
+        self.color_btn.setStyleSheet(f"background-color: {self.selected_color.name()}; color: {txt_col}; font-weight: bold; border: 1px solid #888;")
+
+    def get_result(self):
+        return self.text_edit.toPlainText(), self.size_spin.value(), self.selected_color
+
+
 class TableEditDialog(QDialog):
-    """表データのグラフィカル再編集ダイアログ"""
-    def __init__(self, parent=None, grid_data=None, cell_w=100, cell_h=30, align="CENTER"):
+    """表データのグラフィカル再編集ダイアログ（文字サイズ・文字色＆自動フィッティング機能付き）"""
+    def __init__(self, parent=None, grid_data=None, cell_w=100, cell_h=30, align="CENTER", font_size=12, color=None):
         super().__init__(parent)
         self.setWindowTitle("表データの再編集")
-        self.resize(580, 450)
+        self.resize(650, 480)
 
         self.grid_data = copy.deepcopy(grid_data) if grid_data else [[""]]
         self.cell_w = cell_w
         self.cell_h = cell_h
         self.align = align
+        self.font_size = font_size
+        self.selected_color = QColor(color) if color else QColor(0, 0, 0)
 
         main_layout = QVBoxLayout(self)
 
@@ -59,6 +117,18 @@ class TableEditDialog(QDialog):
         self.h_spin.setRange(5.0, 1000.0)
         self.h_spin.setValue(float(self.cell_h))
         cfg_layout.addWidget(self.h_spin)
+
+        cfg_layout.addWidget(QLabel("文字サイズ(pt):"))
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(6, 200)
+        self.font_spin.setValue(int(self.font_size))
+        cfg_layout.addWidget(self.font_spin)
+
+        cfg_layout.addWidget(QLabel("文字色:"))
+        self.color_btn = QPushButton(" 色を選択 ")
+        self.update_color_button_style()
+        self.color_btn.clicked.connect(self.choose_color)
+        cfg_layout.addWidget(self.color_btn)
 
         cfg_layout.addWidget(QLabel("文字揃え:"))
         self.align_combo = QComboBox()
@@ -78,11 +148,14 @@ class TableEditDialog(QDialog):
         add_col_btn.clicked.connect(self.add_col)
         del_col_btn = QPushButton("－ 列削除")
         del_col_btn.clicked.connect(self.del_col)
+        auto_fit_btn = QPushButton("📐 文字に合わせ自動調整")
+        auto_fit_btn.clicked.connect(self.auto_fit_cell_size)
 
         btn_layout.addWidget(add_row_btn)
         btn_layout.addWidget(del_row_btn)
         btn_layout.addWidget(add_col_btn)
         btn_layout.addWidget(del_col_btn)
+        btn_layout.addWidget(auto_fit_btn)
         main_layout.addLayout(btn_layout)
 
         self.table_widget = QTableWidget()
@@ -98,6 +171,16 @@ class TableEditDialog(QDialog):
         dlg_btns.addWidget(ok_btn)
         dlg_btns.addWidget(cancel_btn)
         main_layout.addLayout(dlg_btns)
+
+    def choose_color(self):
+        col = QColorDialog.getColor(self.selected_color, self, "文字色の選択")
+        if col.isValid():
+            self.selected_color = col
+            self.update_color_button_style()
+
+    def update_color_button_style(self):
+        txt_col = "#000000" if (self.selected_color.red()*0.299 + self.selected_color.green()*0.587 + self.selected_color.blue()*0.114) > 180 else "#FFFFFF"
+        self.color_btn.setStyleSheet(f"background-color: {self.selected_color.name()}; color: {txt_col}; font-weight: bold; border: 1px solid #888;")
 
     def populate_table(self):
         rows = len(self.grid_data)
@@ -121,6 +204,23 @@ class TableEditDialog(QDialog):
         if curr >= 0: self.table_widget.removeColumn(curr)
         elif self.table_widget.columnCount() > 0: self.table_widget.removeColumn(self.table_widget.columnCount() - 1)
 
+    def auto_fit_cell_size(self):
+        f_size = self.font_spin.value()
+        max_lines = 1
+        max_chars = 1
+        for r in range(self.table_widget.rowCount()):
+            for c in range(self.table_widget.columnCount()):
+                item = self.table_widget.item(r, c)
+                if item and item.text():
+                    lines = item.text().split("\n")
+                    max_lines = max(max_lines, len(lines))
+                    for line in lines:
+                        max_chars = max(max_chars, len(line))
+        calc_w = max(40.0, max_chars * f_size * 0.9 + 20.0)
+        calc_h = max(20.0, max_lines * f_size * 1.5 + 10.0)
+        self.w_spin.setValue(calc_w)
+        self.h_spin.setValue(calc_h)
+
     def get_result(self):
         rows = self.table_widget.rowCount()
         cols = self.table_widget.columnCount()
@@ -134,7 +234,7 @@ class TableEditDialog(QDialog):
 
         align_list = ["CENTER", "LEFT", "RIGHT"]
         res_align = align_list[self.align_combo.currentIndex()]
-        return res_grid, self.w_spin.value(), self.h_spin.value(), res_align
+        return res_grid, self.w_spin.value(), self.h_spin.value(), res_align, self.font_spin.value(), self.selected_color
 
 
 class CADCanvas(QGraphicsView):
@@ -365,8 +465,10 @@ class CADCanvas(QGraphicsView):
                     cell_w = s.get("cell_w", 100)
                     cell_h = s.get("cell_h", 30)
                     align = s.get("align", "CENTER")
+                    f_size = s.get("font_size", 12)
+                    t_col = s.get("color", self.current_color)
                     pos_val = s.get("pos", (0, 0))
-                    self.add_table_data(grid_data, cell_w, cell_h, QPointF(pos_val[0], pos_val[1]), align=align, target_shape=s)
+                    self.add_table_data(grid_data, cell_w, cell_h, QPointF(pos_val[0], pos_val[1]), align=align, font_size=f_size, color=t_col, target_shape=s)
                     continue
                 elif stype == "polyline":
                     pts = [QPointF(pt[0], pt[1]) for pt in s["points"]]
@@ -387,6 +489,31 @@ class CADCanvas(QGraphicsView):
             QMessageBox.information(self, "成功", f"プロジェクトを読み込みました:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"プロジェクトデータの構造解析に失敗しました:\n{e}")
+
+    # --- 単体テキスト編集 ---
+    def edit_text_shape(self, shape):
+        if not shape or shape.get("type") != "text": return
+        current_txt = shape.get("text", "")
+        current_font_size = shape.get("font_size", 12)
+        current_color = shape.get("color", self.current_color)
+
+        dlg = TextEditDialog(self, text=current_txt, font_size=current_font_size, color=current_color)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_txt, new_size, new_color = dlg.get_result()
+            if new_txt.strip():
+                self.start_history_record()
+                item = shape.get("item")
+                disp_color = self.get_display_color(new_color)
+
+                shape["text"] = new_txt.strip()
+                shape["font_size"] = new_size
+                shape["color"] = new_color
+
+                if item and isinstance(item, QGraphicsTextItem):
+                    item.setPlainText(new_txt.strip())
+                    item.setFont(QFont("Meiryo", int(new_size)))
+                    item.setDefaultTextColor(disp_color)
+                self.commit_history_record()
 
     # --- 自動寸法・要素測定ヘルパー ---
     def calculate_shape_measurements(self, pos):
@@ -429,6 +556,9 @@ class CADCanvas(QGraphicsView):
         dist = math.hypot(dx, dy)
         if dist < 1e-4: return
 
+        angle_rad = math.atan2(dy, dx)
+        angle_deg = math.degrees(angle_rad)
+
         nx, ny = -dy / dist, dx / dist
         p1_ext = QPointF(p1.x() + nx * offset, p1.y() + ny * offset)
         p2_ext = QPointF(p2.x() + nx * offset, p2.y() + ny * offset)
@@ -442,18 +572,24 @@ class CADCanvas(QGraphicsView):
         items.append(self.scene.addLine(p2.x() + nx * 2, p2.y() + ny * 2, p2_ext.x() + nx * 5, p2_ext.y() + ny * 5, pen_ext))
         items.append(self.scene.addLine(p1_ext.x(), p1_ext.y(), p2_ext.x(), p2_ext.y(), pen_dim))
 
-        angle = math.atan2(dy, dx)
-        items.extend(self._draw_arrow_head_shape(p2_ext, angle, self.arrow_head_type))
-        items.extend(self._draw_arrow_head_shape(p1_ext, angle + math.pi, self.arrow_head_type))
+        items.extend(self._draw_arrow_head_shape(p2_ext, angle_rad, self.arrow_head_type))
+        items.extend(self._draw_arrow_head_shape(p1_ext, angle_rad + math.pi, self.arrow_head_type))
 
         val_str = f"{dist * self.scale_factor:.1f}"
         t_item = self.scene.addText(val_str)
         t_item.setDefaultTextColor(disp_color)
         t_item.setFont(QFont("Meiryo", int(max(10, self.current_thickness * 3.5))))
+
+        text_angle = angle_deg
+        if text_angle > 90 or text_angle < -90:
+            text_angle += 180.0
+
         t_rect = t_item.boundingRect()
+        t_item.setTransformOriginPoint(t_rect.width() / 2.0, t_rect.height() / 2.0)
+        t_item.setRotation(text_angle)
 
         mid_x, mid_y = (p1_ext.x() + p2_ext.x()) / 2.0, (p1_ext.y() + p2_ext.y()) / 2.0
-        t_item.setPos(mid_x - t_rect.width() / 2.0 + nx * 10, mid_y - t_rect.height() / 2.0 + ny * 10)
+        t_item.setPos(mid_x - t_rect.width() / 2.0 + nx * 8, mid_y - t_rect.height() / 2.0 + ny * 8)
         items.append(t_item)
 
         group = self.scene.createItemGroup(items)
@@ -474,25 +610,34 @@ class CADCanvas(QGraphicsView):
         disp_color = self.get_display_color(self.current_color)
         pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
         items = []
-        angle = math.atan2(dy, dx)
+        angle_rad = math.atan2(dy, dx)
+        angle_deg = math.degrees(angle_rad)
 
         if is_diameter:
             p0 = QPointF(p1.x() - dx, p1.y() - dy)
             items.append(self.scene.addLine(p0.x(), p0.y(), p2.x(), p2.y(), pen))
-            items.extend(self._draw_arrow_head_shape(p2, angle, self.arrow_head_type))
-            items.extend(self._draw_arrow_head_shape(p0, angle + math.pi, self.arrow_head_type))
+            items.extend(self._draw_arrow_head_shape(p2, angle_rad, self.arrow_head_type))
+            items.extend(self._draw_arrow_head_shape(p0, angle_rad + math.pi, self.arrow_head_type))
             val_str = f"φ{dist * 2.0 * self.scale_factor:.1f}"
         else:
             items.append(self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen))
-            items.extend(self._draw_arrow_head_shape(p2, angle, self.arrow_head_type))
+            items.extend(self._draw_arrow_head_shape(p2, angle_rad, self.arrow_head_type))
             val_str = f"R{dist * self.scale_factor:.1f}"
 
         t_item = self.scene.addText(val_str)
         t_item.setDefaultTextColor(disp_color)
         t_item.setFont(QFont("Meiryo", int(max(10, self.current_thickness * 3.5))))
+
+        text_angle = angle_deg
+        if text_angle > 90 or text_angle < -90:
+            text_angle += 180.0
+
         t_rect = t_item.boundingRect()
+        t_item.setTransformOriginPoint(t_rect.width() / 2.0, t_rect.height() / 2.0)
+        t_item.setRotation(text_angle)
+
         mid_x, mid_y = (p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0
-        t_item.setPos(mid_x - t_rect.width() / 2.0, mid_y - t_rect.height() - 5.0)
+        t_item.setPos(mid_x - t_rect.width() / 2.0, mid_y - t_rect.height() / 2.0 - 5.0)
         items.append(t_item)
 
         group = self.scene.createItemGroup(items)
@@ -505,8 +650,8 @@ class CADCanvas(QGraphicsView):
             "thickness": self.current_thickness, "style": self.current_style, "item": group
         })
 
-    # --- 表（テーブル）自動生成・移動・再編集 ---
-    def add_table_data(self, grid_data, cell_w, cell_h, pos, align="CENTER", target_shape=None):
+    # --- 表（テーブル）自動生成・移動・再編集（文字色対応） ---
+    def add_table_data(self, grid_data, cell_w, cell_h, pos, align="CENTER", font_size=None, color=None, target_shape=None):
         rows = len(grid_data)
         cols = max(len(r) for r in grid_data) if grid_data else 0
         if rows == 0 or cols == 0: return
@@ -515,8 +660,29 @@ class CADCanvas(QGraphicsView):
             align = "CENTER" if align else "LEFT"
         align = str(align).upper()
 
+        if font_size is None:
+            font_size = max(10, int(self.current_thickness * 3.5))
+        else:
+            font_size = int(font_size)
+
+        table_color = QColor(color) if color else self.current_color
+
+        font = QFont("Meiryo", font_size)
+
+        # 収まらない場合の補正計算
+        dummy_item = QGraphicsTextItem()
+        dummy_item.setFont(font)
+        for r in range(rows):
+            for c in range(len(grid_data[r])):
+                val = str(grid_data[r][c]).strip()
+                if val:
+                    dummy_item.setPlainText(val)
+                    rect = dummy_item.boundingRect()
+                    cell_w = max(cell_w, rect.width() + 10.0)
+                    cell_h = max(cell_h, rect.height() + 6.0)
+
         self.start_history_record()
-        disp_color = self.get_display_color(self.current_color)
+        disp_color = self.get_display_color(table_color)
         pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
         sx, sy = pos.x(), pos.y()
 
@@ -528,8 +694,6 @@ class CADCanvas(QGraphicsView):
         for c in range(cols + 1):
             line = self.scene.addLine(sx + c * cell_w, sy, sx + c * cell_w, sy + rows * cell_h, pen)
             table_items.append(line)
-
-        font = QFont("Meiryo", int(max(9, self.current_thickness * 3)))
 
         for r in range(rows):
             for c in range(len(grid_data[r])):
@@ -565,6 +729,8 @@ class CADCanvas(QGraphicsView):
                 target_shape["cell_w"] = cell_w
                 target_shape["cell_h"] = cell_h
                 target_shape["align"] = align
+                target_shape["font_size"] = font_size
+                target_shape["color"] = table_color
                 target_shape["pos"] = (sx, sy)
                 target_shape["item"] = group
             else:
@@ -574,9 +740,10 @@ class CADCanvas(QGraphicsView):
                     "cell_w": cell_w,
                     "cell_h": cell_h,
                     "align": align,
+                    "font_size": font_size,
                     "pos": (sx, sy),
                     "layer": self.active_layer,
-                    "color": self.current_color,
+                    "color": table_color,
                     "thickness": self.current_thickness,
                     "style": self.current_style,
                     "item": group
@@ -600,30 +767,32 @@ class CADCanvas(QGraphicsView):
             grid_data=shape.get("grid_data", [[""]]),
             cell_w=shape.get("cell_w", 100),
             cell_h=shape.get("cell_h", 30),
-            align=shape.get("align", "CENTER")
+            align=shape.get("align", "CENTER"),
+            font_size=shape.get("font_size", 12),
+            color=shape.get("color", self.current_color)
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_grid, new_w, new_h, new_align = dlg.get_result()
-            self.add_table_data(new_grid, new_w, new_h, pos, align=new_align, target_shape=shape)
+            new_grid, new_w, new_h, new_align, new_fsize, new_color = dlg.get_result()
+            self.add_table_data(new_grid, new_w, new_h, pos, align=new_align, font_size=new_fsize, color=new_color, target_shape=shape)
 
     def mouseDoubleClickEvent(self, event):
         item = self.itemAt(event.pos())
         if item:
-            target_shape = None
             for shape in self.shapes:
-                if shape.get("type") == "table":
+                stype = shape.get("type")
+                if stype == "table":
                     grp = shape.get("item")
                     if grp == item or (isinstance(grp, QGraphicsItemGroup) and item in grp.childItems()):
-                        target_shape = shape
-                        break
-            if target_shape:
-                self.edit_table_shape(target_shape)
-                return
+                        self.edit_table_shape(shape)
+                        return
+                elif stype == "text":
+                    if shape.get("item") == item:
+                        self.edit_text_shape(shape)
+                        return
         super().mouseDoubleClickEvent(event)
 
     # --- 矢印形状・方向の設定・変更処理 ---
     def prompt_arrow_settings(self):
-        """ダイアログで矢印の形状・向きを設定"""
         head_types = ["▲ 塗りつぶし (FILLED)", "＞ 開いた線 (OPEN)", "● 黒丸 (DOT)", "/ 建築用斜線 (SLASH)"]
         directions = ["終点のみ (END)", "始点のみ (START)", "両端 (BOTH)"]
 
@@ -744,16 +913,24 @@ class CADCanvas(QGraphicsView):
         selected = self.scene.selectedItems()
         if selected:
             table_shape = None
+            text_shape = None
             for shape in self.shapes:
-                if shape.get("type") == "table":
-                    grp = shape.get("item")
-                    if grp in selected or any(isinstance(grp, QGraphicsItemGroup) and child in selected for child in grp.childItems()):
-                        table_shape = shape
-                        break
+                grp = shape.get("item")
+                if shape.get("type") == "table" and (grp in selected or any(isinstance(grp, QGraphicsItemGroup) and child in selected for child in grp.childItems())):
+                    table_shape = shape
+                    break
+                elif shape.get("type") == "text" and grp in selected:
+                    text_shape = shape
+                    break
 
             if table_shape:
                 tbl_act = menu.addAction("📊 表を再編集...")
                 tbl_act.triggered.connect(lambda: self.edit_table_shape(table_shape))
+                menu.addSeparator()
+
+            if text_shape:
+                txt_act = menu.addAction("📝 文字を再編集...")
+                txt_act.triggered.connect(lambda: self.edit_text_shape(text_shape))
                 menu.addSeparator()
 
             menu.addAction("📋 複製 (Duplicate)", self.duplicate_selected)
@@ -761,7 +938,6 @@ class CADCanvas(QGraphicsView):
             menu.addAction("🗑 削除 (Delete)", self.delete_selected)
             menu.addSeparator()
 
-            # 矢印の設定ダイアログ
             arrow_cfg_act = menu.addAction("🏹 矢印の設定 (形状・向き)...")
             arrow_cfg_act.triggered.connect(self.prompt_arrow_settings)
 
@@ -1549,14 +1725,20 @@ class CADCanvas(QGraphicsView):
             self.commit_history_record(); return
 
         elif self.mode == "TEXT" and event.button() == Qt.MouseButton.LeftButton:
-            input_txt, ok = QInputDialog.getText(self, "文章入力", "挿入するテキスト:")
-            if ok and input_txt.strip():
-                disp_color = self.get_display_color(self.current_color)
-                t_item = self.scene.addText(input_txt.strip())
-                t_item.setDefaultTextColor(disp_color)
-                t_item.setFont(QFont("Meiryo", int(max(11, self.current_thickness * 4))))
-                t_item.setPos(pos)
-                self.shapes.append({"type": "text", "text": input_txt.strip(), "pos": (pos.x(), pos.y()), "font_size": 12, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
+            dlg = TextEditDialog(self, font_size=max(11, int(self.current_thickness * 4)), color=self.current_color)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                input_txt, font_size, text_color = dlg.get_result()
+                if input_txt.strip():
+                    disp_color = self.get_display_color(text_color)
+                    t_item = self.scene.addText(input_txt.strip())
+                    t_item.setDefaultTextColor(disp_color)
+                    t_item.setFont(QFont("Meiryo", int(font_size)))
+                    t_item.setPos(pos)
+                    self.shapes.append({
+                        "type": "text", "text": input_txt.strip(), "pos": (pos.x(), pos.y()),
+                        "font_size": font_size, "layer": self.active_layer, "color": text_color,
+                        "thickness": self.current_thickness, "style": self.current_style, "item": t_item
+                    })
             self.set_mode("SELECT")
             self.commit_history_record(); return
 
