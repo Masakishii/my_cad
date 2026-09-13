@@ -26,12 +26,153 @@ def _clean_for_json(obj):
     elif hasattr(obj, "value"):
         return obj.value
     elif isinstance(obj, dict):
-        return {k: _clean_for_json(v) for k, v in obj.items() if k != "item"}
+        return {k: _clean_for_json(v) for k, v in obj.items() if k != "item" and k != "head_items"}
     elif isinstance(obj, list):
         return [_clean_for_json(i) for i in obj]
     elif isinstance(obj, tuple):
         return [_clean_for_json(i) for i in obj]
     return obj
+
+class CustomPixmapItem(QGraphicsPixmapItem):
+    """ドラッグ操作によるインタラクティブ拡大縮小・回転機能付き PixmapItem"""
+    def __init__(self, pixmap, parent=None):
+        super().__init__(pixmap, parent)
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.setAcceptHoverEvents(True)
+        self.handle_size = 14.0
+        self.active_handle = None
+        self.drag_start_scene_pos = None
+        self.initial_scale = 1.0
+        self.initial_rotation = 0.0
+        self.center_scene_pos = None
+        self.initial_dist = 1.0
+        # 原点を左上 (0,0) に固定してスケール時の座標ズレを防止
+        self.setTransformOriginPoint(0, 0)
+
+    def boundingRect(self):
+        rect = super().boundingRect()
+        margin = self.handle_size + 30.0
+        return rect.adjusted(-margin, -margin, margin, margin)
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        if self.isSelected():
+            painter.save()
+            rect = super().boundingRect()
+            sc = max(0.001, self.scale())
+            
+            # 選択枠の描画
+            pen = QPen(QColor(0, 120, 215), 2.0 / sc, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+            # ハンドルの描画
+            s = self.handle_size / sc
+            painter.setBrush(QBrush(QColor(0, 120, 215)))
+            painter.setPen(QPen(QColor(255, 255, 255), 1.0 / sc))
+
+            handles = self._get_handle_rects(rect, s)
+            for h_rect in handles.values():
+                painter.drawRect(h_rect)
+
+            # 回転ハンドル (上部中央)
+            rot_pt = self._get_rotation_handle_pos(rect, s)
+            top_mid = QPointF(rect.center().x(), rect.top())
+            painter.drawLine(top_mid, rot_pt)
+            painter.drawEllipse(rot_pt, s / 2.0, s / 2.0)
+
+            painter.restore()
+
+    def _get_handle_rects(self, rect, s):
+        return {
+            "TL": QRectF(rect.left() - s/2, rect.top() - s/2, s, s),
+            "TR": QRectF(rect.right() - s/2, rect.top() - s/2, s, s),
+            "BL": QRectF(rect.left() - s/2, rect.bottom() - s/2, s, s),
+            "BR": QRectF(rect.right() - s/2, rect.bottom() - s/2, s, s),
+        }
+
+    def _get_rotation_handle_pos(self, rect, s):
+        return QPointF(rect.center().x(), rect.top() - s * 2.5)
+
+    def hoverMoveEvent(self, event):
+        if self.isSelected():
+            rect = super().boundingRect()
+            sc = max(0.001, self.scale())
+            s = self.handle_size / sc
+            handles = self._get_handle_rects(rect, s)
+            rot_pos = self._get_rotation_handle_pos(rect, s)
+            pos = event.pos()
+
+            if math.hypot(pos.x() - rot_pos.x(), pos.y() - rot_pos.y()) <= s:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+                return
+            for h_rect in handles.values():
+                if h_rect.contains(pos):
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    return
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().hoverMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self.isSelected() and event.button() == Qt.MouseButton.LeftButton:
+            rect = super().boundingRect()
+            sc = max(0.001, self.scale())
+            s = self.handle_size / sc
+            handles = self._get_handle_rects(rect, s)
+            rot_pos = self._get_rotation_handle_pos(rect, s)
+            pos = event.pos()
+
+            if math.hypot(pos.x() - rot_pos.x(), pos.y() - rot_pos.y()) <= s:
+                self.active_handle = "ROTATE"
+                self.drag_start_scene_pos = event.scenePos()
+                self.initial_rotation = self.rotation()
+                event.accept()
+                return
+
+            for h_name, h_rect in handles.items():
+                if h_rect.contains(pos):
+                    self.active_handle = h_name
+                    self.drag_start_scene_pos = event.scenePos()
+                    self.initial_scale = self.scale()
+                    self.center_scene_pos = self.scenePos()
+                    self.initial_dist = math.hypot(
+                        event.scenePos().x() - self.center_scene_pos.x(),
+                        event.scenePos().y() - self.center_scene_pos.y()
+                    )
+                    event.accept()
+                    return
+
+        self.active_handle = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.active_handle == "ROTATE":
+            rect = super().boundingRect()
+            center_scene = self.mapToScene(rect.center())
+            curr_pos = event.scenePos()
+            angle = math.degrees(math.atan2(curr_pos.y() - center_scene.y(), curr_pos.x() - center_scene.x())) + 90.0
+            self.setRotation(angle)
+            return
+
+        elif self.active_handle in ["TL", "TR", "BL", "BR"]:
+            curr_pos = event.scenePos()
+            curr_dist = math.hypot(curr_pos.x() - self.center_scene_pos.x(), curr_pos.y() - self.center_scene_pos.y())
+            if self.initial_dist > 0:
+                scale_val = self.initial_scale * (curr_dist / self.initial_dist)
+                self.setScale(max(0.01, scale_val))
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.active_handle = None
+        super().mouseReleaseEvent(event)
+
 
 class TextEditDialog(QDialog):
     """文章入力・再編集用ダイアログ（改行・フォントサイズ・文字色対応）"""
@@ -347,6 +488,19 @@ class CADCanvas(QGraphicsView):
             ]
         }
 
+    def _sync_item_transforms(self):
+        """画面上で移動・変形されたQGraphicsItemの実際の座標・変形情報をshape辞書に同期"""
+        for shape in self.shapes:
+            item = shape.get("item")
+            if not item: continue
+            stype = shape.get("type")
+            if stype in ["image", "text", "table", "block_ref", "point"]:
+                spos = item.scenePos()
+                shape["pos"] = (spos.x(), spos.y())
+                if hasattr(item, "scale"): shape["scale"] = item.scale()
+                if hasattr(item, "rotation"): shape["rotation"] = item.rotation()
+                if hasattr(item, "opacity"): shape["opacity"] = item.opacity()
+
     # --- 新規作成・保存・読み込み ---
     def new_project(self):
         if self.shapes or any(not isinstance(i, QGraphicsItemGroup) for i in self.scene.items()):
@@ -370,6 +524,7 @@ class CADCanvas(QGraphicsView):
         file_path, _ = QFileDialog.getSaveFileName(self, "プロジェクトを保存", "", "CAD Project Files (*.json)")
         if not file_path: return
         try:
+            self._sync_item_transforms()
             data = {
                 "version": "1.0",
                 "layers": _clean_for_json(self.layers),
@@ -440,13 +595,53 @@ class CADCanvas(QGraphicsView):
                 color = self.get_display_color(s["color"])
                 thickness = s.get("thickness", self.current_thickness)
                 pen = QPen(color, thickness, style)
-                item = None
 
-                if stype == "line":
-                    item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
+                if stype == "image":
+                    fpath = s.get("file_path", "")
+                    if fpath and os.path.exists(fpath):
+                        pixmap = None
+                        if fpath.lower().endswith('.pdf'):
+                            try:
+                                doc_pdf = pymupdf.open(fpath)
+                                pix = doc_pdf[0].get_pixmap(dpi=150)
+                                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+                            except Exception: pass
+                        else:
+                            pixmap = QPixmap(fpath)
+
+                        if pixmap and not pixmap.isNull():
+                            item = CustomPixmapItem(pixmap)
+                            pos_val = s.get("pos", (0, 0))
+                            item.setPos(pos_val[0], pos_val[1])
+                            item.setScale(s.get("scale", 1.0))
+                            item.setRotation(s.get("rotation", 0.0))
+                            item.setOpacity(s.get("opacity", 1.0))
+
+                            if s.get("layer") == "背景図面":
+                                item.setZValue(-100)
+
+                            is_movable = (self.mode == "SELECT" and not self.layers.get(s.get("layer", "0"), {}).get("locked", False))
+                            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_movable)
+                            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_movable)
+
+                            self.scene.addItem(item)
+                            s["item"] = item
+                            self.shapes.append(s)
+                    continue
+
+                elif stype == "dimension":
+                    self.create_autocad_dimension(QPointF(s["p1"][0], s["p1"][1]), QPointF(s["p2"][0], s["p2"][1]))
+                    continue
                 elif stype == "arrow":
                     item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
+                    s["item"] = item
                     self._update_arrow_shape_graphics(s)
+                    self.shapes.append(s)
+                    continue
+                elif stype == "leader":
+                    self.add_leader_with_auto_measure(QPointF(s["p1"][0], s["p1"][1]), QPointF(s["p2"][0], s["p2"][1]))
+                    continue
                 elif stype == "rect":
                     x1, y1, x2, y2 = s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1]
                     item = self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen)
@@ -481,6 +676,8 @@ class CADCanvas(QGraphicsView):
                     item = self.scene.addText(s["text"])
                     item.setDefaultTextColor(color); item.setFont(QFont("Meiryo", int(s.get("font_size", 12))))
                     item.setPos(s["pos"][0], s["pos"][1])
+                elif stype == "line":
+                    item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
 
                 s["item"] = item
                 self.shapes.append(s)
@@ -558,11 +755,112 @@ class CADCanvas(QGraphicsView):
                     t_item.setPos(pos[0], pos[1])
                     self.shapes.append({"type": "text", "text": txt, "pos": pos, "font_size": 12, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
 
+                elif dxftype == 'IMAGE':
+                    image_def = entity.image_def
+                    if image_def:
+                        fpath = image_def.dxf.filename
+                        if fpath and os.path.exists(fpath):
+                            pixmap = QPixmap(fpath)
+                            if not pixmap.isNull():
+                                img_w, img_h = pixmap.width(), pixmap.height()
+                                size_units = getattr(entity.dxf, 'size_in_units', (img_w, img_h))
+                                w_units, h_units = size_units[0], size_units[1]
+                                sc = h_units / img_h if img_h > 0 else 1.0
+
+                                item = CustomPixmapItem(pixmap)
+                                px = entity.dxf.insert.x
+                                # DXF(Bottom-Left: entity.dxf.insert.y) -> キャンバス(Top-Left: -insert.y - h_units)へ補正変換
+                                py = -entity.dxf.insert.y - h_units
+                                item.setPos(px, py)
+                                item.setScale(sc)
+                                if layer_name == "背景図面":
+                                    item.setZValue(-100)
+
+                                self.scene.addItem(item)
+                                self.shapes.append({
+                                    "type": "image", "file_path": fpath, "pos": (px, py),
+                                    "scale": sc, "rotation": 0.0, "opacity": 1.0,
+                                    "layer": layer_name, "item": item
+                                })
+
             self.apply_layer_states()
             self.commit_history_record()
             QMessageBox.information(self, "成功", f"DXFファイルを読み込みました:\n{os.path.basename(file_path)}")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"DXFインポート失敗:\n{e}")
+
+    # --- 画像・PDFの挿入と背景設定 ---
+    def insert_image_or_pdf(self, file_path, pos=None):
+        self.start_history_record()
+        pixmap = None
+        if file_path.lower().endswith('.pdf'):
+            try:
+                doc = pymupdf.open(file_path)
+                pix = doc[0].get_pixmap(dpi=150)
+                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+            except Exception as e: QMessageBox.critical(self, "エラー", f"PDF挿入失敗:\n{e}"); return
+        else:
+            pixmap = QPixmap(file_path)
+            if pixmap.isNull(): return
+
+        pixmap_item = CustomPixmapItem(pixmap)
+        is_select = (self.mode == "SELECT")
+        pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_select)
+        pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_select)
+
+        if pos:
+            p_x, p_y = pos.x(), pos.y()
+        else:
+            scene_center = self.mapToScene(self.viewport().rect().center())
+            p_x, p_y = scene_center.x() - pixmap.width() / 2.0, scene_center.y() - pixmap.height() / 2.0
+        
+        pixmap_item.setPos(p_x, p_y)
+        self.scene.addItem(pixmap_item)
+
+        self.shapes.append({
+            "type": "image",
+            "file_path": file_path,
+            "pos": (p_x, p_y),
+            "scale": 1.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "layer": self.active_layer,
+            "item": pixmap_item
+        })
+        self.commit_history_record()
+
+    def set_background_file(self, file_path):
+        if not os.path.exists(file_path): return
+        pixmap = None
+        if file_path.lower().endswith('.pdf'):
+            try:
+                doc = pymupdf.open(file_path)
+                pix = doc[0].get_pixmap(dpi=150)
+                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+            except Exception as e: QMessageBox.critical(self, "エラー", f"PDF読込失敗:\n{e}"); return
+        else:
+            pixmap = QPixmap(file_path)
+            if pixmap.isNull(): return
+
+        pixmap_item = CustomPixmapItem(pixmap)
+        pixmap_item.setPos(0, 0)
+        pixmap_item.setZValue(-100)
+        self.scene.addItem(pixmap_item)
+
+        bg_layer = "背景図面" if "背景図面" in self.layers else self.active_layer
+        self.shapes.append({
+            "type": "image",
+            "file_path": file_path,
+            "pos": (0, 0),
+            "scale": 1.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "layer": bg_layer,
+            "item": pixmap_item
+        })
+        self.scene.setSceneRect(-100000, -100000, 200000, 200000)
 
     # --- 単体テキスト編集 ---
     def edit_text_shape(self, shape):
@@ -1074,7 +1372,7 @@ class CADCanvas(QGraphicsView):
             layer_act = menu.addAction("🏷️ レイヤー変更...")
             layer_act.triggered.connect(self.prompt_change_selected_layer)
 
-            has_image = any(isinstance(i, QGraphicsPixmapItem) for i in selected)
+            has_image = any(isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem)) for i in selected)
             if has_image:
                 opacity_act = menu.addAction("🌫️ 透明度を変更...")
                 opacity_act.triggered.connect(self.set_selected_image_opacity)
@@ -1572,7 +1870,7 @@ class CADCanvas(QGraphicsView):
                 xs.append(s["center"][0]); ys.append(s["center"][1])
             elif stype in ["polyline", "spline"]:
                 xs.extend([p[0] for p in s["points"]]); ys.extend([p[1] for p in s["points"]])
-            elif stype in ["point", "text", "block_ref", "table"]:
+            elif stype in ["point", "text", "block_ref", "table", "image"]:
                 xs.append(s["pos"][0]); ys.append(s["pos"][1])
 
         center_x = sum(xs) / len(xs) if xs else 0
@@ -1628,7 +1926,7 @@ class CADCanvas(QGraphicsView):
         elif isinstance(item, QGraphicsPolygonItem): new_item = self.scene.addPolygon(item.polygon(), pen, brush)
         elif isinstance(item, QGraphicsPathItem): new_item = self.scene.addPath(item.path(), pen)
         elif isinstance(item, QGraphicsTextItem): new_item = self.scene.addText(item.toPlainText(), item.font()); new_item.setDefaultTextColor(item.defaultTextColor())
-        elif isinstance(item, QGraphicsPixmapItem): new_item = self.scene.addPixmap(item.pixmap())
+        elif isinstance(item, (QGraphicsPixmapItem, CustomPixmapItem)): new_item = CustomPixmapItem(item.pixmap())
         if new_item:
             new_item.setPos(item.pos()); new_item.setRotation(item.rotation()); new_item.setScale(item.scale())
             new_item.setTransformOriginPoint(item.transformOriginPoint())
@@ -1644,7 +1942,29 @@ class CADCanvas(QGraphicsView):
         pen = QPen(color, thickness, style)
         item = None
 
-        if stype == "line":
+        if stype == "image":
+            fpath = shape.get("file_path", "")
+            if fpath and os.path.exists(fpath):
+                pixmap = None
+                if fpath.lower().endswith('.pdf'):
+                    try:
+                        doc_pdf = pymupdf.open(fpath)
+                        pix = doc_pdf[0].get_pixmap(dpi=150)
+                        fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                        pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+                    except Exception: pass
+                else:
+                    pixmap = QPixmap(fpath)
+
+                if pixmap and not pixmap.isNull():
+                    item = CustomPixmapItem(pixmap)
+                    pos_val = shape.get("pos", (0, 0))
+                    item.setPos(pos_val[0], pos_val[1])
+                    item.setScale(shape.get("scale", 1.0))
+                    item.setRotation(shape.get("rotation", 0.0))
+                    item.setOpacity(shape.get("opacity", 1.0))
+
+        elif stype == "line":
             item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen)
         elif stype == "arrow":
             item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen)
@@ -2252,7 +2572,7 @@ class CADCanvas(QGraphicsView):
             shape["p2"] = (shape["p2"][0] + dx, shape["p2"][1] + dy)
         elif stype in ["circle", "ellipse", "arc"]: shape["center"] = (shape["center"][0] + dx, shape["center"][1] + dy)
         elif stype in ["polyline", "spline"]: shape["points"] = [(px + dx, py + dy) for px, py in shape["points"]]
-        elif stype in ["point", "text", "block_ref", "table"]: shape["pos"] = (shape["pos"][0] + dx, shape["pos"][1] + dy)
+        elif stype in ["point", "text", "block_ref", "table", "image"]: shape["pos"] = (shape["pos"][0] + dx, shape["pos"][1] + dy)
 
     def _find_trim_target_and_split(self, pos):
         click_pt = Point(pos.x(), pos.y())
@@ -2467,7 +2787,7 @@ class CADCanvas(QGraphicsView):
                     snaps.append(((pts[i][0] + pts[i+1][0]) / 2, (pts[i][1] + pts[i+1][1]) / 2, "MID"))
 
         for item in self.scene.items():
-            if isinstance(item, QGraphicsPixmapItem):
+            if isinstance(item, (QGraphicsPixmapItem, CustomPixmapItem)):
                 rect = item.sceneBoundingRect()
                 x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
                 corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
@@ -2680,13 +3000,18 @@ class CADCanvas(QGraphicsView):
         if ok and layer_name: self.change_selected_layer(layer_name)
 
     def set_selected_image_opacity(self):
-        selected = [i for i in self.scene.selectedItems() if isinstance(i, QGraphicsPixmapItem)]
+        selected = [i for i in self.scene.selectedItems() if isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem))]
         if not selected: return
         current_opacity = int(selected[0].opacity() * 100)
         val, ok = QInputDialog.getInt(self, "透明度の変更", "不透明度を入力してください (10〜100%):", current_opacity, 10, 100, 5)
         if ok:
+            new_opacity = val / 100.0
             self.start_history_record()
-            for item in selected: item.setOpacity(val / 100.0)
+            for item in selected:
+                item.setOpacity(new_opacity)
+                for shape in self.shapes:
+                    if shape.get("item") == item:
+                        shape["opacity"] = new_opacity
             self.commit_history_record()
 
     # --- ヘルパー処理 ---
@@ -2712,6 +3037,7 @@ class CADCanvas(QGraphicsView):
         file_path, _ = QFileDialog.getSaveFileName(self, "DXF形式で保存", "", "DXF Files (*.dxf)")
         if not file_path: return
         try:
+            self._sync_item_transforms()
             doc = ezdxf.new('R2010')
             msp = doc.modelspace()
             for l_name, l_props in self.layers.items():
@@ -2726,15 +3052,83 @@ class CADCanvas(QGraphicsView):
                 attribs = {'true_color': ezdxf.rgb2int((color.red(), color.green(), color.blue())), 'layer': layer}
                 stype = shape.get("type")
 
-                if stype in ["line", "arrow", "dimension", "leader"]:
+                if stype == "image":
+                    fpath = shape.get("file_path", "")
+                    if fpath and os.path.exists(fpath):
+                        try:
+                            if fpath.lower().endswith('.pdf'):
+                                doc_pdf = pymupdf.open(fpath)
+                                pix = doc_pdf[0].get_pixmap(dpi=150)
+                                img_w, img_h = pix.width, pix.height
+                            else:
+                                pixmap = QPixmap(fpath)
+                                img_w, img_h = pixmap.width(), pixmap.height()
+
+                            px, py = shape["pos"][0], shape["pos"][1]
+                            sc = shape.get("scale", 1.0)
+                            w_units = img_w * sc
+                            h_units = img_h * sc
+
+                            image_def = doc.add_image_def(filename=fpath, size_in_pixel=(img_w, img_h))
+                            # キャンバス(Top-Left: px, py) -> DXF(Bottom-Left: px, -py - h_units)へ補正変換
+                            msp.add_image(
+                                image_def=image_def,
+                                insert=(px, -py - h_units),
+                                size_in_units=(w_units, h_units),
+                                dxfattribs=attribs
+                            )
+                        except Exception:
+                            pass
+
+                elif stype == "line":
                     msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                elif stype == "arrow":
+                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                elif stype == "dimension":
+                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                    val_str = shape.get("val_str", "")
+                    if val_str:
+                        mx = (shape["p1"][0] + shape["p2"][0]) / 2.0
+                        my = -(shape["p1"][1] + shape["p2"][1]) / 2.0
+                        msp.add_text(val_str, dxfattribs={'height': 12, 'insert': (mx, my)} | attribs)
+                elif stype == "leader":
+                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                    txt = shape.get("text", "")
+                    if txt:
+                        msp.add_text(txt, dxfattribs={'height': 12, 'insert': (shape["p2"][0], -shape["p2"][1])} | attribs)
                 elif stype == "rect":
                     x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]
                     msp.add_lwpolyline([(x1, -y1), (x2, -y1), (x2, -y2), (x1, -y2)], close=True, dxfattribs=attribs)
                 elif stype == "circle":
                     msp.add_circle((shape["center"][0], -shape["center"][1]), shape["radius"], dxfattribs=attribs)
+                elif stype == "arc":
+                    cx, cy = shape["center"][0], -shape["center"][1]
+                    r = shape["radius"]
+                    st = -shape["start_angle"]
+                    sp = -shape["span_angle"]
+                    msp.add_arc((cx, cy), r, st, st + sp, dxfattribs=attribs)
                 elif stype in ["polyline", "spline"]:
                     msp.add_lwpolyline([(x, -y) for x, y in shape["points"]], close=shape.get("is_closed", False), dxfattribs=attribs)
+                elif stype == "text":
+                    msp.add_text(shape.get("text", ""), dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (shape["pos"][0], -shape["pos"][1])} | attribs)
+                elif stype == "table":
+                    grid_data = shape.get("grid_data", [])
+                    cell_w = shape.get("cell_w", 100)
+                    cell_h = shape.get("cell_h", 30)
+                    sx, sy = shape["pos"][0], shape["pos"][1]
+                    rows = len(grid_data)
+                    cols = max(len(r) for r in grid_data) if grid_data else 0
+                    for r in range(rows + 1):
+                        msp.add_line((sx, -(sy + r * cell_h)), (sx + cols * cell_w, -(sy + r * cell_h)), dxfattribs=attribs)
+                    for c in range(cols + 1):
+                        msp.add_line((sx + c * cell_w, -sy), (sx + c * cell_w, -(sy + rows * cell_h)), dxfattribs=attribs)
+                    for r in range(rows):
+                        for c in range(len(grid_data[r])):
+                            val = str(grid_data[r][c]).strip()
+                            if val:
+                                tx = sx + c * cell_w + 5
+                                ty = -(sy + r * cell_h + cell_h / 2)
+                                msp.add_text(val, dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (tx, ty)} | attribs)
 
             doc.saveas(file_path)
             QMessageBox.information(self, "成功", f"DXFファイルを保存しました:\n{file_path}")
@@ -2757,41 +3151,6 @@ class CADCanvas(QGraphicsView):
             self.commit_history_record()
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"JWW読み込み失敗:\n{e}")
-
-    def set_background_file(self, file_path):
-        if file_path.lower().endswith('.pdf'):
-            try:
-                doc = pymupdf.open(file_path)
-                pix = doc[0].get_pixmap(dpi=150)
-                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
-            except Exception as e: QMessageBox.critical(self, "エラー", f"PDF読込失敗:\n{e}"); return
-        else: pixmap = QPixmap(file_path)
-        self.scene.addPixmap(pixmap)
-        self.scene.setSceneRect(-100000, -100000, 200000, 200000)
-
-    def insert_image_or_pdf(self, file_path, pos=None):
-        self.start_history_record()
-        if file_path.lower().endswith('.pdf'):
-            try:
-                doc = pymupdf.open(file_path)
-                pix = doc[0].get_pixmap(dpi=150)
-                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
-            except Exception as e: QMessageBox.critical(self, "エラー", f"PDF挿入失敗:\n{e}"); return
-        else:
-            pixmap = QPixmap(file_path)
-            if pixmap.isNull(): return
-
-        pixmap_item = self.scene.addPixmap(pixmap)
-        is_select = (self.mode == "SELECT")
-        pixmap_item.setFlag(QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable, is_select)
-        pixmap_item.setFlag(QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable, is_select)
-        if pos: pixmap_item.setPos(pos)
-        else:
-            scene_center = self.mapToScene(self.viewport().rect().center())
-            pixmap_item.setPos(scene_center.x() - pixmap.width() / 2, scene_center.y() - pixmap.height() / 2)
-        self.commit_history_record()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls(): event.acceptProposedAction()
@@ -2831,7 +3190,7 @@ class CADCanvas(QGraphicsView):
 
     def fit_paper_guide_to_selected(self):
         selected = self.scene.selectedItems()
-        target = selected[0] if selected else next((i for i in self.scene.items() if isinstance(i, QGraphicsPixmapItem)), None)
+        target = selected[0] if selected else next((i for i in self.scene.items() if isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem))), None)
         if target:
             self.update_paper_guide(show=True, custom_rect=target.sceneBoundingRect())
             return True
