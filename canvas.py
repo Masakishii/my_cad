@@ -110,10 +110,16 @@ class CADCanvas(QGraphicsView):
         self.snap_marker = None
         self.shapes = []
 
-    # --- 色変換ロジック（黒のみ白反転・有彩色は色を保持） ---
+    # --- キーボードイベント ---
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_selected()
+        else:
+            super().keyPressEvent(event)
+
+    # --- 色変換ロジック ---
     def get_display_color(self, raw_color, is_export=False):
         if not is_export and self.is_dark_mode:
-            # R, G, B がすべて暗い（黒系）場合のみ背景黒で白に反転
             if raw_color.red() < 50 and raw_color.green() < 50 and raw_color.blue() < 50:
                 return QColor(255, 255, 255)
         return raw_color
@@ -145,16 +151,6 @@ class CADCanvas(QGraphicsView):
             elif hasattr(item, "setDefaultTextColor"):
                 item.setDefaultTextColor(disp_color)
         self.refresh_display_colors(is_export=is_export)
-
-    # --- トラッキング (OTRACK) 制御 ---
-    def set_otrack_enabled(self, enabled):
-        self.otrack_enabled = enabled
-        self.clear_tracking_lines()
-
-    def clear_tracking_lines(self):
-        for item in self.tracking_items:
-            self.safe_remove_item(item)
-        self.tracking_items.clear()
 
     # --- グループ化機能 ---
     def group_selected_items(self):
@@ -247,6 +243,46 @@ class CADCanvas(QGraphicsView):
                     child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.commit_history_record()
 
+    # --- 右クリックメニューイベント ---
+    def contextMenuEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item and item not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)):
+            if not item.isSelected():
+                self.scene.clearSelection()
+                item.setSelected(True)
+
+            menu = QMenu(self)
+            front_act = menu.addAction("⬆ 最前面へ移動")
+            back_act = menu.addAction("⬇ 最背面へ移動")
+            menu.addSeparator()
+            join_act = menu.addAction("🔗 結合 (JOIN)")
+            center_act = menu.addAction("🎯 中心線生成 (CENTERLINE)")
+            grp_act = menu.addAction("📦 グループ化")
+            ungrp_act = menu.addAction("💥 グループ解除")
+            menu.addSeparator()
+            layer_act = menu.addAction("🏷️ レイヤーを変更...")
+            
+            has_image = any(isinstance(i, QGraphicsPixmapItem) for i in self.scene.selectedItems())
+            opacity_act = menu.addAction("🌫️ 下絵の透明度を変更") if has_image else None
+
+            menu.addSeparator()
+            dup_act = menu.addAction("📋 複製")
+            del_act = menu.addAction("🗑 削除")
+
+            action = menu.exec(event.globalPos())
+            if action == front_act: self.bring_selected_to_front()
+            elif action == back_act: self.send_selected_to_back()
+            elif action == join_act: self.join_selected_lines()
+            elif action == center_act: self.generate_centerlines()
+            elif action == grp_act: self.group_selected_items()
+            elif action == ungrp_act: self.ungroup_selected_items()
+            elif action == layer_act: self.prompt_change_selected_layer()
+            elif has_image and action == opacity_act: self.set_selected_image_opacity()
+            elif action == dup_act: self.duplicate_selected()
+            elif action == del_act: self.delete_selected()
+            return
+        super().contextMenuEvent(event)
+
     # --- モード切替 & マウスイベント制御 ---
     def set_mode(self, mode):
         self.finish_multi_point_mode()
@@ -330,9 +366,17 @@ class CADCanvas(QGraphicsView):
             self.commit_history_record(); return
 
         if event.button() == Qt.MouseButton.RightButton:
-            if self.mode in ["POLYLINE", "POLYGON", "SPLINE"] and len(self.poly_points) > 0: self.finish_polyline()
-            else: self.set_mode("SELECT")
-            self.commit_history_record(); return
+            if self.mode in ["POLYLINE", "POLYGON", "SPLINE"] and len(self.poly_points) > 0:
+                self.finish_polyline()
+                self.commit_history_record()
+                return
+            elif self.mode != "SELECT":
+                self.set_mode("SELECT")
+                self.commit_history_record()
+                return
+            else:
+                super().mousePressEvent(event)
+                return
 
         raw_pos = self.mapToScene(event.pos())
         pos = self.get_snapped_pos(raw_pos)
@@ -715,13 +759,9 @@ class CADCanvas(QGraphicsView):
             for s in action[2]: self.shapes.append(s)
         self.undo_stack.append(action)
 
-    def set_color(self, color):
-        self.current_color = color; self.apply_property_to_selected(color=color)
-    def set_thickness(self, thickness):
-        self.current_thickness = thickness; self.apply_property_to_selected(thickness=thickness)
-    def set_style(self, style):
-        self.current_style = style; self.apply_property_to_selected(style=style)
-
+    def set_color(self, color): self.current_color = color; self.apply_property_to_selected(color=color)
+    def set_thickness(self, thickness): self.current_thickness = thickness; self.apply_property_to_selected(thickness=thickness)
+    def set_style(self, style): self.current_style = style; self.apply_property_to_selected(style=style)
     def set_cloud_pitch(self, pitch): self.cloud_pitch = pitch
     def set_cloud_arc_height(self, height): self.cloud_arc_height = height
 
@@ -753,339 +793,6 @@ class CADCanvas(QGraphicsView):
         angle_rad = math.atan2(dy, dx)
         snapped_deg = round(math.degrees(angle_rad) / 15.0) * 15.0
         return QPointF(p1.x() + dist * math.cos(math.radians(snapped_deg)), p1.y() + dist * math.sin(math.radians(snapped_deg)))
-
-    def count_objects_by_layer(self):
-        counts = {}
-        for lyr in self.layers.keys(): counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
-        for s in self.shapes:
-            lyr = s.get("layer", "0")
-            if lyr not in counts: counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
-            stype = s.get("type")
-            counts[lyr]["total"] += 1
-            if stype == "block_ref":
-                counts[lyr]["block_ref"] += 1
-                bname = s.get("block_name", "未定義ブロック")
-                counts[lyr]["blocks_detail"][bname] = counts[lyr]["blocks_detail"].get(bname, 0) + 1
-            elif stype == "group": counts[lyr]["group"] += 1
-            else: counts[lyr]["basic"] += 1
-        return counts
-
-    def change_selected_layer(self, new_layer_name):
-        selected_items = self.scene.selectedItems()
-        if not selected_items or new_layer_name not in self.layers: return
-        self.start_history_record()
-        all_scene_items = [i for i in self.scene.items() if i != self.paper_guide_item and i != getattr(self, 'custom_print_rect_item', None)]
-        for shape, item in zip(self.shapes, all_scene_items):
-            if item.isSelected(): shape["layer"] = new_layer_name
-        self.apply_layer_states()
-        self.commit_history_record()
-
-    def prompt_change_selected_layer(self):
-        layer_names = list(self.layers.keys())
-        current_idx = layer_names.index(self.active_layer) if self.active_layer in layer_names else 0
-        layer_name, ok = QInputDialog.getItem(self, "レイヤー変更", "変更先のレイヤーを選択してください:", layer_names, current_idx, False)
-        if ok and layer_name: self.change_selected_layer(layer_name)
-
-    def set_selected_image_opacity(self):
-        selected = [i for i in self.scene.selectedItems() if isinstance(i, QGraphicsPixmapItem)]
-        if not selected: return
-        current_opacity = int(selected[0].opacity() * 100)
-        val, ok = QInputDialog.getInt(self, "透明度の変更", "不透明度を入力してください (10〜100%):", current_opacity, 10, 100, 5)
-        if ok:
-            self.start_history_record()
-            for item in selected: item.setOpacity(val / 100.0)
-            self.commit_history_record()
-
-    def bring_selected_to_front(self):
-        for item in self.scene.selectedItems(): item.setZValue(max([i.zValue() for i in self.scene.items()] or [0]) + 1)
-    def send_selected_to_back(self):
-        for item in self.scene.selectedItems(): item.setZValue(min([i.zValue() for i in self.scene.items()] or [0]) - 1)
-    def duplicate_selected(self):
-        self.start_history_record()
-        for item in self.scene.selectedItems():
-            cloned = self._clone_item(item)
-            if cloned: cloned.moveBy(20, 20); cloned.setSelected(True)
-        self.commit_history_record()
-    def delete_selected(self):
-        deleted = self.scene.selectedItems()
-        if deleted:
-            self.start_history_record()
-            for item in deleted: self.safe_remove_item(item)
-            self.commit_history_record()
-
-    def contextMenuEvent(self, event):
-        if self.mode == "SELECT":
-            item = self.itemAt(event.pos())
-            if item and item not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)):
-                if not item.isSelected():
-                    self.scene.clearSelection(); item.setSelected(True)
-
-                menu = QMenu(self)
-                front_act = menu.addAction("⬆ 最前面へ移動")
-                back_act = menu.addAction("⬇ 最背面へ移動")
-                menu.addSeparator()
-                join_act = menu.addAction("🔗 結合 (JOIN)")
-                center_act = menu.addAction("🎯 中心線生成 (CENTERLINE)")
-                grp_act = menu.addAction("📦 グループ化")
-                ungrp_act = menu.addAction("💥 グループ解除")
-                menu.addSeparator()
-                layer_act = menu.addAction("🏷️ レイヤーを変更...")
-                
-                has_image = any(isinstance(i, QGraphicsPixmapItem) for i in self.scene.selectedItems())
-                opacity_act = menu.addAction("🌫️ 下絵の透明度を変更") if has_image else None
-
-                menu.addSeparator()
-                dup_act = menu.addAction("📋 複製")
-                del_act = menu.addAction("🗑 削除")
-
-                action = menu.exec(event.globalPos())
-                if action == front_act: self.bring_selected_to_front()
-                elif action == back_act: self.send_selected_to_back()
-                elif action == join_act: self.join_selected_lines()
-                elif action == center_act: self.generate_centerlines()
-                elif action == grp_act: self.group_selected_items()
-                elif action == ungrp_act: self.ungroup_selected_items()
-                elif action == layer_act: self.prompt_change_selected_layer()
-                elif has_image and action == opacity_act: self.set_selected_image_opacity()
-                elif action == dup_act: self.duplicate_selected()
-                elif action == del_act: self.delete_selected()
-                return
-        super().contextMenuEvent(event)
-
-    def _clone_item(self, item):
-        pen = item.pen() if hasattr(item, "pen") else QPen()
-        brush = item.brush() if hasattr(item, "brush") else QBrush()
-        new_item = None
-        if isinstance(item, QGraphicsLineItem): new_item = self.scene.addLine(item.line(), pen)
-        elif isinstance(item, QGraphicsRectItem): new_item = self.scene.addRect(item.rect(), pen, brush)
-        elif isinstance(item, QGraphicsEllipseItem): new_item = self.scene.addEllipse(item.rect(), pen, brush)
-        elif isinstance(item, QGraphicsPolygonItem): new_item = self.scene.addPolygon(item.polygon(), pen, brush)
-        elif isinstance(item, QGraphicsPathItem): new_item = self.scene.addPath(item.path(), pen)
-        elif isinstance(item, QGraphicsTextItem): new_item = self.scene.addText(item.toPlainText(), item.font()); new_item.setDefaultTextColor(item.defaultTextColor())
-        elif isinstance(item, QGraphicsPixmapItem): new_item = self.scene.addPixmap(item.pixmap())
-        if new_item:
-            new_item.setPos(item.pos()); new_item.setRotation(item.rotation()); new_item.setScale(item.scale())
-            new_item.setTransformOriginPoint(item.transformOriginPoint())
-            new_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-            new_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        return new_item
-
-    # --- 数値指定・連続配置・表データ挿入 ---
-    def process_coordinate_input(self, x, y, is_relative=False):
-        if is_relative:
-            base_x, base_y = (self.start_point.x(), self.start_point.y()) if self.start_point else (self.shapes[-1]["pos"] if self.shapes and "pos" in self.shapes[-1] else (0.0, 0.0))
-            target_pt = QPointF(base_x + x, base_y + y)
-        else: target_pt = QPointF(x, y)
-        cx, cy, pen = target_pt.x(), target_pt.y(), QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-
-        self.start_history_record()
-        if self.mode == "POINT":
-            r = max(2.0, self.current_thickness); self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen, QBrush(self.get_display_color(self.current_color)))
-            self.shapes.append({"type": "point", "pos": (cx, cy), "layer": self.active_layer, "color": self.current_color})
-        elif self.mode in ["LINE", "RECT", "CIRCLE"]:
-            if self.start_point is None: self.start_point = target_pt
-            else:
-                x1, y1 = self.start_point.x(), self.start_point.y()
-                if self.mode == "LINE":
-                    self.scene.addLine(x1, y1, cx, cy, pen)
-                    self.shapes.append({"type": "line", "p1": (x1, y1), "p2": (cx, cy), "layer": self.active_layer, "color": self.current_color})
-                self.start_point = None
-        self.commit_history_record()
-
-    def generate_pitch_points(self, count, dx, dy, start_pos=None):
-        if not start_pos: start_pos = self.mapToScene(self.viewport().rect().center())
-        self.start_history_record()
-        disp_color, pen = self.get_display_color(self.current_color), QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-        for i in range(1, count + 1):
-            cx, cy = start_pos.x() + dx * i, start_pos.y() + dy * i
-            if self.mode == "POINT":
-                r = max(2.0, self.current_thickness); self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen, QBrush(disp_color))
-                self.shapes.append({"type": "point", "pos": (cx, cy), "layer": self.active_layer, "color": self.current_color})
-        self.commit_history_record()
-
-    def generate_concentric_shapes(self, shape_type, base_size, step_val, is_multiplier, count, sides=4, center=None):
-        cx, cy = (center.x(), center.y()) if center else (self.mapToScene(self.viewport().rect().center()).x(), self.mapToScene(self.viewport().rect().center()).y())
-        self.start_history_record()
-        pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-        current_r = base_size
-        for i in range(count):
-            if shape_type == "CIRCLE":
-                self.scene.addEllipse(cx - current_r, cy - current_r, 2 * current_r, 2 * current_r, pen)
-                self.shapes.append({"type": "circle", "center": (cx, cy), "radius": current_r, "layer": self.active_layer, "color": self.current_color})
-            elif shape_type == "RECT":
-                self.scene.addRect(cx - current_r, cy - current_r, 2 * current_r, 2 * current_r, pen)
-                self.shapes.append({"type": "rect", "p1": (cx - current_r, cy - current_r), "p2": (cx + current_r, cy + current_r), "layer": self.active_layer, "color": self.current_color})
-            elif shape_type == "POLYGON":
-                pts = self._calc_regular_polygon_points_by_angle(cx, cy, current_r, sides, 0.0)
-                self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in pts]), pen, QBrush(Qt.BrushStyle.NoBrush))
-                self.shapes.append({"type": "polyline", "points": pts, "is_closed": True, "layer": self.active_layer, "color": self.current_color})
-            current_r = current_r * step_val if is_multiplier else current_r + step_val
-        self.commit_history_record()
-
-    def _calc_regular_polygon_points_by_angle(self, cx, cy, radius, sides, start_angle_deg):
-        base_angle = math.radians(start_angle_deg)
-        return [(cx + radius * math.cos(base_angle + 2 * math.pi * i / sides), cy + radius * math.sin(base_angle + 2 * math.pi * i / sides)) for i in range(sides)]
-
-    def add_table_data(self, grid_data, cell_w, cell_h, pos):
-        rows, cols = len(grid_data), max(len(r) for r in grid_data) if grid_data else 0
-        if rows == 0 or cols == 0: return
-        self.start_history_record()
-        disp_color, pen = self.get_display_color(self.current_color), QPen(self.get_display_color(self.current_color), self.current_thickness, Qt.PenStyle.SolidLine)
-        sx, sy = pos.x(), pos.y()
-        for r in range(rows + 1): self.scene.addLine(sx, sy + r * cell_h, sx + cols * cell_w, sy + r * cell_h, pen)
-        for c in range(cols + 1): self.scene.addLine(sx + c * cell_w, sy, sx + c * cell_w, sy + rows * cell_h, pen)
-        font = QFont("Meiryo", 10)
-        for r in range(rows):
-            for c in range(len(grid_data[r])):
-                val = str(grid_data[r][c]).strip()
-                if val:
-                    t = self.scene.addText(val, font); t.setDefaultTextColor(disp_color); t.setPos(sx + c * cell_w + 5, sy + r * cell_h + 3)
-        self.commit_history_record()
-
-    def auto_trace_region(self, rect):
-        try: import cv2; import numpy as np
-        except ImportError: return
-        target_pixmap_item = next((i for i in self.scene.items(rect) if isinstance(i, QGraphicsPixmapItem)), None)
-        if not target_pixmap_item: return
-        local_rect = target_pixmap_item.mapFromScene(rect).boundingRect()
-        image = target_pixmap_item.pixmap().toImage().convertToFormat(QImage.Format.Format_RGB888)
-        ix, iy = int(max(0, local_rect.x())), int(max(0, local_rect.y()))
-        iw, ih = int(min(image.width() - ix, local_rect.width())), int(min(image.height() - iy, local_rect.height()))
-        if iw <= 0 or ih <= 0: return
-        ptr = image.bits(); ptr.setsize(image.sizeInBytes())
-        arr = np.array(ptr).reshape(image.height(), image.width(), 3)
-        cropped = arr[iy:iy+ih, ix:ix+iw]
-        gray = cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=40, minLineLength=30, maxLineGap=10)
-        if lines is None: return
-        self.start_history_record()
-        pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-        scene_pos, scale = target_pixmap_item.scenePos(), target_pixmap_item.scale()
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            sx1, sy1, sx2, sy2 = scene_pos.x() + (ix + x1) * scale, scene_pos.y() + (iy + y1) * scale, scene_pos.x() + (ix + x2) * scale, scene_pos.y() + (iy + y2) * scale
-            self.scene.addLine(sx1, sy1, sx2, sy2, pen)
-            self.shapes.append({"type": "line", "p1": (sx1, sy1), "p2": (sx2, sy2), "layer": self.active_layer, "color": self.current_color})
-        self.commit_history_record()
-
-    def _find_trim_target_and_split(self, pos):
-        click_pt = Point(pos.x(), pos.y())
-        target_shape = None
-        min_dist = 12.0
-        for shape in self.shapes:
-            geom = self._shape_to_shapely(shape)
-            if geom and geom.geom_type in ['LineString', 'MultiLineString']:
-                d = geom.distance(click_pt)
-                if d < min_dist: min_dist, target_shape = d, shape
-        if not target_shape: return None, [], None
-
-        target_geom = self._shape_to_shapely(target_shape)
-        intersections = []
-        for shape in self.shapes:
-            if shape == target_shape: continue
-            other_geom = self._shape_to_shapely(shape)
-            if other_geom and target_geom.intersects(other_geom):
-                inter = target_geom.intersection(other_geom)
-                if isinstance(inter, Point): intersections.append(inter)
-                elif isinstance(inter, MultiPoint): intersections.extend(inter.geoms)
-                elif isinstance(inter, GeometryCollection):
-                    for g in inter.geoms:
-                        if isinstance(g, Point): intersections.append(g)
-
-        if not intersections: return target_geom, [], target_shape
-
-        cut_pts = MultiPoint(intersections)
-        snapped_target = snap(target_geom, cut_pts, 1.0)
-        split_res = split(snapped_target, cut_pts)
-        segments = list(split_res.geoms) if hasattr(split_res, 'geoms') else [split_res]
-
-        best_seg, best_dist = None, float('inf')
-        for seg in segments:
-            d = seg.distance(click_pt)
-            if d < best_dist: best_dist, best_seg = d, seg
-        return best_seg, [s for s in segments if s != best_seg], target_shape
-
-    def _find_extend_target(self, pos):
-        click_pt = Point(pos.x(), pos.y())
-        target_shape = None
-        min_dist = 15.0
-        for shape in self.shapes:
-            geom = self._shape_to_shapely(shape)
-            if geom and geom.geom_type in ['LineString', 'MultiLineString']:
-                d = geom.distance(click_pt)
-                if d < min_dist: min_dist, target_shape = d, shape
-        if not target_shape or target_shape.get("type") not in ["line", "polyline"]: return None, None
-
-        stype = target_shape["type"]
-        coords = [target_shape["p1"], target_shape["p2"]] if stype == "line" else target_shape["points"]
-        if len(coords) < 2: return None, None
-
-        p_start, p_end = QPointF(*coords[0]), QPointF(*coords[-1])
-        extend_from_start = math.hypot(pos.x() - p_start.x(), pos.y() - p_start.y()) < math.hypot(pos.x() - p_end.x(), pos.y() - p_end.y())
-        near_pt, far_pt = (p_start, p_end) if extend_from_start else (p_end, p_start)
-
-        dx, dy = near_pt.x() - far_pt.x(), near_pt.y() - far_pt.y()
-        length = math.hypot(dx, dy)
-        if length < 1e-4: return None, None
-
-        ray_ls = LineString([(near_pt.x(), near_pt.y()), (near_pt.x() + (dx / length) * 50000.0, near_pt.y() + (dy / length) * 50000.0)])
-        closest_inter_pt, min_inter_dist = None, float("inf")
-
-        for shape in self.shapes:
-            if shape == target_shape: continue
-            other_geom = self._shape_to_shapely(shape)
-            if other_geom and ray_ls.intersects(other_geom):
-                inter = ray_ls.intersection(other_geom)
-                pts = [inter] if isinstance(inter, Point) else list(inter.geoms) if isinstance(inter, MultiPoint) else []
-                for pt in pts:
-                    dist = math.hypot(pt.x - near_pt.x(), pt.y - near_pt.y())
-                    if 1.0 < dist < min_inter_dist: min_inter_dist, closest_inter_pt = dist, QPointF(pt.x, pt.y)
-
-        if closest_inter_pt:
-            new_shape = dict(target_shape)
-            if stype == "line":
-                if extend_from_start: new_shape["p1"] = (closest_inter_pt.x(), closest_inter_pt.y())
-                else: new_shape["p2"] = (closest_inter_pt.x(), closest_inter_pt.y())
-            elif stype == "polyline":
-                pts = list(target_shape["points"])
-                if extend_from_start: pts[0] = (closest_inter_pt.x(), closest_inter_pt.y())
-                else: pts[-1] = (closest_inter_pt.x(), closest_inter_pt.y())
-                new_shape["points"] = pts
-            return target_shape, new_shape
-        return None, None
-
-    def execute_fillet_chamfer(self, pos):
-        click_pt = Point(pos.x(), pos.y())
-        target_shapes = []
-        for shape in self.shapes:
-            if shape.get("type") == "line":
-                geom = LineString([shape["p1"], shape["p2"]])
-                if geom.distance(click_pt) < 20.0: target_shapes.append(shape)
-        if len(target_shapes) < 2: return
-
-        s1, s2 = target_shapes[0], target_shapes[1]
-        p1, p2 = QPointF(*s1["p1"]), QPointF(*s1["p2"])
-        p3, p4 = QPointF(*s2["p1"]), QPointF(*s2["p2"])
-
-        den = (p1.x()-p2.x())*(p3.y()-p4.y()) - (p1.y()-p2.y())*(p3.x()-p4.x())
-        if den == 0: return 
-        px = ((p1.x()*p2.y() - p1.y()*p2.x())*(p3.x()-p4.x()) - (p1.x()-p2.x())*(p3.x()*p4.y() - p3.y()*p4.x())) / den
-        py = ((p1.x()*p2.y() - p1.y()*p2.x())*(p3.y()-p4.y()) - (p1.y()-p2.y())*(p3.x()*p4.y() - p3.y()*p4.x())) / den
-
-        self.start_history_record()
-        pen1 = QPen(self.get_display_color(s1.get("color", self.current_color)), self.current_thickness, self.current_style)
-        pen2 = QPen(self.get_display_color(s2.get("color", self.current_color)), self.current_thickness, self.current_style)
-
-        self.scene.addLine(s1["p1"][0], s1["p1"][1], px, py, pen1)
-        self.scene.addLine(px, py, s2["p2"][0], s2["p2"][1], pen2)
-
-        if s1 in self.shapes: self.shapes.remove(s1)
-        if s2 in self.shapes: self.shapes.remove(s2)
-        
-        self.shapes.append({"type": "line", "p1": s1["p1"], "p2": (px, py), "layer": s1.get("layer", self.active_layer), "color": s1.get("color", self.current_color)})
-        self.shapes.append({"type": "line", "p1": (px, py), "p2": s2["p2"], "layer": s2.get("layer", self.active_layer), "color": s2.get("color", self.current_color)})
-        self.commit_history_record()
 
     # --- 入出力 & 印刷機能 ---
     def save_project_json(self):
