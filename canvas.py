@@ -490,6 +490,80 @@ class CADCanvas(QGraphicsView):
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"プロジェクトデータの構造解析に失敗しました:\n{e}")
 
+    # --- DXFファイルのインポート ---
+    def import_dxf_file(self, file_path=None):
+        if not file_path:
+            file_path, _ = QFileDialog.getOpenFileName(self, "DXFファイルを開く", "", "DXF Files (*.dxf)")
+        if not file_path or not os.path.exists(file_path): return
+
+        try:
+            doc = ezdxf.readfile(file_path)
+            msp = doc.modelspace()
+            self.start_history_record()
+
+            for entity in msp:
+                dxftype = entity.dxftype()
+                layer_name = entity.dxf.layer if hasattr(entity.dxf, 'layer') else "0"
+                if layer_name not in self.layers:
+                    self.layers[layer_name] = {"color": QColor(0, 0, 0), "thickness": 2, "style": Qt.PenStyle.SolidLine, "visible": True, "locked": False, "printable": True}
+
+                color = self.layers[layer_name]["color"]
+                pen = QPen(self.get_display_color(color), self.current_thickness, self.current_style)
+
+                if dxftype == 'LINE':
+                    p1 = (entity.dxf.start.x, -entity.dxf.start.y)
+                    p2 = (entity.dxf.end.x, -entity.dxf.end.y)
+                    item = self.scene.addLine(p1[0], p1[1], p2[0], p2[1], pen)
+                    self.shapes.append({"type": "line", "p1": p1, "p2": p2, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+
+                elif dxftype == 'CIRCLE':
+                    cx, cy = entity.dxf.center.x, -entity.dxf.center.y
+                    r = entity.dxf.radius
+                    item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
+                    self.shapes.append({"type": "circle", "center": (cx, cy), "radius": r, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+
+                elif dxftype == 'ARC':
+                    cx, cy = entity.dxf.center.x, -entity.dxf.center.y
+                    r = entity.dxf.radius
+                    st = -entity.dxf.start_angle
+                    end_a = -entity.dxf.end_angle
+                    span = (end_a - st) % 360
+                    if span == 0: span = -360
+                    path = QPainterPath()
+                    path.arcMoveTo(cx - r, cy - r, 2 * r, 2 * r, st)
+                    path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, span)
+                    item = self.scene.addPath(path, pen)
+                    self.shapes.append({"type": "arc", "center": (cx, cy), "radius": r, "start_angle": st, "span_angle": span, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+
+                elif dxftype in ['LWPOLYLINE', 'POLYLINE']:
+                    pts = [(p[0], -p[1]) for p in entity.get_points()]
+                    is_closed = entity.is_closed
+                    qpts = [QPointF(px, py) for px, py in pts]
+                    if is_closed:
+                        item = self.scene.addPolygon(QPolygonF(qpts), pen)
+                    else:
+                        path = QPainterPath()
+                        if qpts:
+                            path.moveTo(qpts[0])
+                            for pt in qpts[1:]: path.lineTo(pt)
+                        item = self.scene.addPath(path, pen)
+                    self.shapes.append({"type": "polyline", "points": pts, "is_closed": is_closed, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+
+                elif dxftype in ['TEXT', 'MTEXT']:
+                    txt = entity.dxf.text if dxftype == 'TEXT' else entity.text
+                    pos = (entity.dxf.insert.x, -entity.dxf.insert.y) if hasattr(entity.dxf, 'insert') else (0, 0)
+                    t_item = self.scene.addText(txt)
+                    t_item.setDefaultTextColor(self.get_display_color(color))
+                    t_item.setFont(QFont("Meiryo", 12))
+                    t_item.setPos(pos[0], pos[1])
+                    self.shapes.append({"type": "text", "text": txt, "pos": pos, "font_size": 12, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
+
+            self.apply_layer_states()
+            self.commit_history_record()
+            QMessageBox.information(self, "成功", f"DXFファイルを読み込みました:\n{os.path.basename(file_path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"DXFインポート失敗:\n{e}")
+
     # --- 単体テキスト編集 ---
     def edit_text_shape(self, shape):
         if not shape or shape.get("type") != "text": return
@@ -650,7 +724,7 @@ class CADCanvas(QGraphicsView):
             "thickness": self.current_thickness, "style": self.current_style, "item": group
         })
 
-    # --- 表（テーブル）自動生成・移動・再編集（文字色対応） ---
+    # --- 表（テーブル）自動生成・移動・再編集 ---
     def add_table_data(self, grid_data, cell_w, cell_h, pos, align="CENTER", font_size=None, color=None, target_shape=None):
         rows = len(grid_data)
         cols = max(len(r) for r in grid_data) if grid_data else 0
@@ -666,10 +740,8 @@ class CADCanvas(QGraphicsView):
             font_size = int(font_size)
 
         table_color = QColor(color) if color else self.current_color
-
         font = QFont("Meiryo", font_size)
 
-        # 収まらない場合の補正計算
         dummy_item = QGraphicsTextItem()
         dummy_item.setFont(font)
         for r in range(rows):
@@ -1020,8 +1092,11 @@ class CADCanvas(QGraphicsView):
             select_all_act = menu.addAction("☑ すべて選択 (Ctrl+A)")
             select_all_act.triggered.connect(lambda: [i.setSelected(True) for i in self.scene.items() if i not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None))])
             
-            new_act = menu.addAction("📄 キャンバスクリア (新規)")
-            new_act.triggered.connect(self.new_project)
+            new_act = menu.addAction("📄 DXFファイルを読み込む...")
+            new_act.triggered.connect(lambda: self.import_dxf_file())
+
+            new_proj_act = menu.addAction("📄 キャンバスクリア (新規)")
+            new_proj_act.triggered.connect(self.new_project)
 
         menu.exec(event.globalPos())
 
@@ -2728,6 +2803,7 @@ class CADCanvas(QGraphicsView):
             if file_path:
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in ['.jww', '.jws']: self.import_jww_file(file_path)
+                elif ext == '.dxf': self.import_dxf_file(file_path)
                 else: self.insert_image_or_pdf(file_path, self.mapToScene(event.position().toPoint()))
         event.acceptProposedAction()
 
