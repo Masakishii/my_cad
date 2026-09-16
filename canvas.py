@@ -5,7 +5,7 @@ import pymupdf
 import ezdxf
 import copy
 from shapely.geometry import LineString, Point, Polygon, MultiPoint, GeometryCollection, MultiPolygon
-from shapely.ops import split, snap
+from shapely.ops import split, snap, unary_union, polygonize
 
 from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QInputDialog, QMessageBox, 
                              QFileDialog, QGraphicsItem, QGraphicsEllipseItem, 
@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QInputDialog, QMessa
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit, QColorDialog)
 from PyQt6.QtGui import (QPen, QColor, QPixmap, QPolygonF, QBrush, QFont, QImage, 
-                         QPainterPath, QPainter, QPageSize, QPageLayout)
+                         QPainterPath, QPainter, QPageSize, QPageLayout, QTransform)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 
@@ -34,7 +34,7 @@ def _clean_for_json(obj):
     return obj
 
 class CustomPixmapItem(QGraphicsPixmapItem):
-    """ドラッグ操作によるインタラクティブ拡大縮小・回転機能付き PixmapItem"""
+    """アフィン変換（QTransform）対応の完全同期型インタラクティブ PixmapItem"""
     def __init__(self, pixmap, parent=None):
         super().__init__(pixmap, parent)
         self.setFlags(
@@ -50,7 +50,10 @@ class CustomPixmapItem(QGraphicsPixmapItem):
         self.initial_rotation = 0.0
         self.center_scene_pos = None
         self.initial_dist = 1.0
-        # 原点を左上 (0,0) に固定してスケール時の座標ズレを防止
+        self.setTransformOriginPoint(0, 0)
+
+    def setPixmap(self, pixmap):
+        super().setPixmap(pixmap)
         self.setTransformOriginPoint(0, 0)
 
     def boundingRect(self):
@@ -65,13 +68,11 @@ class CustomPixmapItem(QGraphicsPixmapItem):
             rect = super().boundingRect()
             sc = max(0.001, self.scale())
             
-            # 選択枠の描画
             pen = QPen(QColor(0, 120, 215), 2.0 / sc, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
 
-            # ハンドルの描画
             s = self.handle_size / sc
             painter.setBrush(QBrush(QColor(0, 120, 215)))
             painter.setPen(QPen(QColor(255, 255, 255), 1.0 / sc))
@@ -80,7 +81,6 @@ class CustomPixmapItem(QGraphicsPixmapItem):
             for h_rect in handles.values():
                 painter.drawRect(h_rect)
 
-            # 回転ハンドル (上部中央)
             rot_pt = self._get_rotation_handle_pos(rect, s)
             top_mid = QPointF(rect.center().x(), rect.top())
             painter.drawLine(top_mid, rot_pt)
@@ -175,7 +175,7 @@ class CustomPixmapItem(QGraphicsPixmapItem):
 
 
 class TextEditDialog(QDialog):
-    """文章入力・再編集用ダイアログ（改行・フォントサイズ・文字色対応）"""
+    """文章入力・再編集用ダイアログ"""
     def __init__(self, parent=None, text="", font_size=12, color=None):
         super().__init__(parent)
         self.setWindowTitle("文章の入力・編集")
@@ -231,7 +231,7 @@ class TextEditDialog(QDialog):
 
 
 class TableEditDialog(QDialog):
-    """表データのグラフィカル再編集ダイアログ（文字サイズ・文字色＆自動フィッティング機能付き）"""
+    """表データのグラフィカル再編集ダイアログ"""
     def __init__(self, parent=None, grid_data=None, cell_w=100, cell_h=30, align="CENTER", font_size=12, color=None):
         super().__init__(parent)
         self.setWindowTitle("表データの再編集")
@@ -418,13 +418,15 @@ class CADCanvas(QGraphicsView):
         self.arrow_head_type = "FILLED"
         self.arrow_direction = "END"
 
+        self.preset_line_length = 0.0  # 水平・垂直線の距離指定 (0.0で画面全体/自動)
+        self.offset_dist = 20.0
+
         self.cloud_pitch = 20.0
         self.cloud_arc_height = 8.0
         self.preset_rect_w, self.preset_rect_h = 100.0, 50.0
         self.preset_circle_r = 40.0
         self.preset_arc_r, self.preset_arc_start, self.preset_arc_span = 40.0, 0.0, 90.0
         self.preset_poly_sides, self.preset_poly_r, self.preset_poly_angle = 6, 40.0, 0.0
-        self.offset_dist = 20.0
         self.rotate_angle = 45.0
         self.scale_factor_val = 1.5
         self.array_rows, self.array_cols = 3, 3
@@ -489,7 +491,7 @@ class CADCanvas(QGraphicsView):
         }
 
     def _sync_item_transforms(self):
-        """画面上で移動・変形されたQGraphicsItemの実際の座標・変形情報をshape辞書に同期"""
+        """画面上で移動・変形されたQGraphicsItemの実際の座標・変形行列情報をshape辞書に同期"""
         for shape in self.shapes:
             item = shape.get("item")
             if not item: continue
@@ -497,6 +499,8 @@ class CADCanvas(QGraphicsView):
             if stype in ["image", "text", "table", "block_ref", "point"]:
                 spos = item.scenePos()
                 shape["pos"] = (spos.x(), spos.y())
+                t = item.transform()
+                shape["transform"] = [t.m11(), t.m12(), t.m21(), t.m22(), t.dx(), t.dy()]
                 if hasattr(item, "scale"): shape["scale"] = item.scale()
                 if hasattr(item, "rotation"): shape["rotation"] = item.rotation()
                 if hasattr(item, "opacity"): shape["opacity"] = item.opacity()
@@ -614,8 +618,14 @@ class CADCanvas(QGraphicsView):
                             item = CustomPixmapItem(pixmap)
                             pos_val = s.get("pos", (0, 0))
                             item.setPos(pos_val[0], pos_val[1])
-                            item.setScale(s.get("scale", 1.0))
-                            item.setRotation(s.get("rotation", 0.0))
+
+                            if "transform" in s:
+                                m = s["transform"]
+                                item.setTransform(QTransform(m[0], m[1], m[2], m[3], m[4], m[5]))
+                            else:
+                                item.setScale(s.get("scale", 1.0))
+                                item.setRotation(s.get("rotation", 0.0))
+
                             item.setOpacity(s.get("opacity", 1.0))
 
                             if s.get("layer") == "背景図面":
@@ -640,7 +650,7 @@ class CADCanvas(QGraphicsView):
                     self.shapes.append(s)
                     continue
                 elif stype == "leader":
-                    self.add_leader_with_auto_measure(QPointF(s["p1"][0], s["p1"][1]), QPointF(s["p2"][0], s["p2"][1]))
+                    self.add_leader_with_auto_measure(QPointF(s["p1"][0], s["p1"][1]), QPointF(s["p2"][0], s["p2"][1]), text=s.get("text"))
                     continue
                 elif stype == "rect":
                     x1, y1, x2, y2 = s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1]
@@ -763,23 +773,36 @@ class CADCanvas(QGraphicsView):
                             pixmap = QPixmap(fpath)
                             if not pixmap.isNull():
                                 img_w, img_h = pixmap.width(), pixmap.height()
-                                size_units = getattr(entity.dxf, 'size_in_units', (img_w, img_h))
-                                w_units, h_units = size_units[0], size_units[1]
-                                sc = h_units / img_h if img_h > 0 else 1.0
+                                dxf_bl = entity.dxf.insert
+                                u_pix = getattr(entity.dxf, 'u_pixel', (1.0, 0.0))
+                                v_pix = getattr(entity.dxf, 'v_pixel', (0.0, 1.0))
+
+                                dxf_tl_x = dxf_bl.x + v_pix[0] * img_h
+                                dxf_tl_y = dxf_bl.y + v_pix[1] * img_h
+
+                                canvas_px = dxf_tl_x
+                                canvas_py = -dxf_tl_y
+
+                                m11 = u_pix[0]
+                                m12 = -u_pix[1]
+                                m21 = -v_pix[0]
+                                m22 = v_pix[1]
 
                                 item = CustomPixmapItem(pixmap)
-                                px = entity.dxf.insert.x
-                                # DXF(Bottom-Left: entity.dxf.insert.y) -> キャンバス(Top-Left: -insert.y - h_units)へ補正変換
-                                py = -entity.dxf.insert.y - h_units
-                                item.setPos(px, py)
-                                item.setScale(sc)
+                                item.setPos(canvas_px, canvas_py)
+                                item.setTransform(QTransform(m11, m12, m21, m22, 0, 0))
+
                                 if layer_name == "背景図面":
                                     item.setZValue(-100)
 
                                 self.scene.addItem(item)
                                 self.shapes.append({
-                                    "type": "image", "file_path": fpath, "pos": (px, py),
-                                    "scale": sc, "rotation": 0.0, "opacity": 1.0,
+                                    "type": "image", "file_path": fpath,
+                                    "pos": (canvas_px, canvas_py),
+                                    "transform": [m11, m12, m21, m22, 0, 0],
+                                    "scale": math.hypot(m11, m12),
+                                    "rotation": math.degrees(math.atan2(-m12, m11)),
+                                    "opacity": 1.0,
                                     "layer": layer_name, "item": item
                                 })
 
@@ -788,6 +811,88 @@ class CADCanvas(QGraphicsView):
             QMessageBox.information(self, "成功", f"DXFファイルを読み込みました:\n{os.path.basename(file_path)}")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"DXFインポート失敗:\n{e}")
+
+    # --- 直線・水平線・垂直線・オフセット関連プロンプト ---
+    def prompt_line_length_settings(self):
+        val, ok = QInputDialog.getDouble(self, "水平・垂直線の長さ指定", "描画する線の長さ（mm）を入力してください\n(0 を指定すると画面端まで伸ばします):", self.preset_line_length, 0.0, 100000.0, 1)
+        if ok:
+            self.preset_line_length = val
+            msg = "今後の水平・垂直線は全画面長で作図されます。" if val <= 0 else f"今後の水平・垂直線の長さを {val} mm に設定しました。"
+            QMessageBox.information(self, "完了", msg)
+
+    def prompt_offset_settings(self):
+        val, ok = QInputDialog.getDouble(self, "平行線 (オフセット)", "オフセットのピッチ距離（mm）を入力してください:", self.offset_dist, 0.1, 100000.0, 1)
+        if ok and val > 0:
+            self.offset_dist = val
+            self.execute_exact_offset(val)
+
+    def prompt_xy_offset_settings(self):
+        dx_val, ok1 = QInputDialog.getDouble(self, "X軸方向ピッチ平行複写", "X軸方向（左右）のピッチ距離（mm）:", 50.0, -100000.0, 100000.0, 1)
+        if not ok1: return
+        dy_val, ok2 = QInputDialog.getDouble(self, "Y軸方向ピッチ平行複写", "Y軸方向（上下）のピッチ距離（mm）:", 0.0, -100000.0, 100000.0, 1)
+        if not ok2: return
+        self.execute_xy_pitch_offset(dx_val, dy_val)
+
+    def execute_exact_offset(self, dist):
+        """選択線分・ポリラインの長さを完全に保持した平行線（オフセット）を生成"""
+        selected = self.scene.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "通知", "オフセットする線を選択してください。")
+            return
+
+        self.start_history_record()
+        pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
+
+        for item in selected:
+            shape = next((s for s in self.shapes if s.get("item") == item), None)
+            if not shape: continue
+            stype = shape.get("type")
+
+            if stype == "line":
+                p1, p2 = QPointF(*shape["p1"]), QPointF(*shape["p2"])
+                dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+                length = math.hypot(dx, dy)
+                if length > 1e-4:
+                    nx, ny = -dy / length, dx / length
+                    new_p1 = (p1.x() + nx * dist, p1.y() + ny * dist)
+                    new_p2 = (p2.x() + nx * dist, p2.y() + ny * dist)
+                    o_item = self.scene.addLine(new_p1[0], new_p1[1], new_p2[0], new_p2[1], pen)
+                    self.shapes.append({"type": "line", "p1": new_p1, "p2": new_p2, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
+
+            elif stype == "polyline":
+                pts = shape["points"]
+                if len(pts) >= 2:
+                    ls = LineString(pts)
+                    off_ls = ls.parallel_offset(dist, 'left')
+                    if not off_ls.is_empty and hasattr(off_ls, 'coords'):
+                        c_pts = list(off_ls.coords)
+                        path = QPainterPath(); path.moveTo(QPointF(c_pts[0][0], c_pts[0][1]))
+                        for pt in c_pts[1:]: path.lineTo(QPointF(pt[0], pt[1]))
+                        o_item = self.scene.addPath(path, pen)
+                        self.shapes.append({"type": "polyline", "points": c_pts, "is_closed": False, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
+
+        self.commit_history_record()
+
+    def execute_xy_pitch_offset(self, dx_pitch, dy_pitch):
+        """X軸・Y軸のピッチ距離指定で完全平行配置"""
+        selected = self.scene.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "通知", "平行複写するオブジェクトを選択してください。")
+            return
+
+        self.start_history_record()
+        for item in selected:
+            for shape in list(self.shapes):
+                if shape.get("item") == item:
+                    s_copy = {k: v for k, v in shape.items() if k != "item"}
+                    s_copy = copy.deepcopy(s_copy)
+                    self._translate_shape(s_copy, dx_pitch, dy_pitch)
+                    new_item = self._recreate_shape_item(s_copy)
+                    if new_item:
+                        new_item.setSelected(True)
+                        s_copy["item"] = new_item
+                        self.shapes.append(s_copy)
+        self.commit_history_record()
 
     # --- 画像・PDFの挿入と背景設定 ---
     def insert_image_or_pdf(self, file_path, pos=None):
@@ -1336,6 +1441,14 @@ class CADCanvas(QGraphicsView):
 
             menu.addSeparator()
 
+            # オフセット・ピッチ並びメニュー
+            off_act = menu.addAction("↔️ 平行線 (オフセット距離指定)...")
+            off_act.triggered.connect(self.prompt_offset_settings)
+            xy_off_act = menu.addAction("↕️ X軸/Y軸ピッチ平行線...")
+            xy_off_act.triggered.connect(self.prompt_xy_offset_settings)
+
+            menu.addSeparator()
+
             rot_act = menu.addAction("🔄 90度回転")
             rot_act.triggered.connect(lambda: self.set_mode("ROTATE"))
             rot_copy_act = menu.addAction("🔄 90度回転コピー")
@@ -1378,6 +1491,8 @@ class CADCanvas(QGraphicsView):
                 opacity_act.triggered.connect(self.set_selected_image_opacity)
 
         else:
+            len_cfg_act = menu.addAction("📏 水平・垂直線の長さ指定...")
+            len_cfg_act.triggered.connect(self.prompt_line_length_settings)
             arrow_cfg_act = menu.addAction("🏹 矢印の設定 (形状・向き)...")
             arrow_cfg_act.triggered.connect(self.prompt_arrow_settings)
             menu.addSeparator()
@@ -1398,7 +1513,63 @@ class CADCanvas(QGraphicsView):
 
         menu.exec(event.globalPos())
 
-    # --- ハッチング機能 ---
+    # --- 境界線抽出・ハッチング機能 ---
+    def _extract_boundaries_from_items(self, items):
+        lines = []
+        for item in items:
+            shape = next((s for s in self.shapes if s.get("item") == item), None)
+            stype = shape.get("type") if shape else None
+
+            if isinstance(item, QGraphicsLineItem) or stype in ["line", "arrow", "leader"]:
+                if shape and "p1" in shape and "p2" in shape:
+                    lines.append(LineString([shape["p1"], shape["p2"]]))
+                else:
+                    line = item.line()
+                    p1 = item.mapToScene(line.p1())
+                    p2 = item.mapToScene(line.p2())
+                    lines.append(LineString([(p1.x(), p1.y()), (p2.x(), p2.y())]))
+
+            elif isinstance(item, QGraphicsRectItem) or stype == "rect":
+                rect = item.sceneTransform().mapRect(item.boundingRect())
+                x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+                lines.append(LineString([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]))
+
+            elif isinstance(item, QGraphicsEllipseItem) or stype in ["circle", "arc"]:
+                if shape and shape.get("type") == "arc":
+                    cx, cy = shape["center"]
+                    r = shape["radius"]
+                    st, sp = shape["start_angle"], shape["span_angle"]
+                    num_pts = max(24, int(abs(sp) / 3))
+                    pts = []
+                    for i in range(num_pts + 1):
+                        ang = math.radians(-st - (sp * i / num_pts))
+                        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+                    if len(pts) >= 2:
+                        lines.append(LineString(pts))
+                else:
+                    rect = item.sceneTransform().mapRect(item.boundingRect())
+                    cx, cy, rx, ry = rect.center().x(), rect.center().y(), rect.width() / 2.0, rect.height() / 2.0
+                    pts = [(cx + rx * math.cos(2 * math.pi * i / 64), cy + ry * math.sin(2 * math.pi * i / 64)) for i in range(65)]
+                    lines.append(LineString(pts))
+
+            elif isinstance(item, QGraphicsPolygonItem) or (shape and shape.get("type") in ["polyline", "spline"]):
+                if shape and "points" in shape:
+                    pts = shape["points"]
+                    if shape.get("is_closed") and len(pts) >= 3:
+                        pts = pts + [pts[0]]
+                    if len(pts) >= 2:
+                        lines.append(LineString(pts))
+                elif isinstance(item, QGraphicsPolygonItem):
+                    poly_f = item.polygon()
+                    pts = [(pt.x(), pt.y()) for pt in poly_f]
+                    if len(pts) >= 2:
+                        lines.append(LineString(pts))
+
+            elif isinstance(item, QGraphicsItemGroup):
+                lines.extend(self._extract_boundaries_from_items(item.childItems()))
+
+        return lines
+
     def _item_to_shapely_polygon(self, item):
         rect = item.sceneTransform().mapRect(item.boundingRect())
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
@@ -1431,14 +1602,28 @@ class CADCanvas(QGraphicsView):
             QMessageBox.warning(self, "通知", "ハッチングを行うオブジェクトを選択してください。")
             return
 
-        polygons = []
+        boundary_lines = self._extract_boundaries_from_items(selected)
+        polygonized_polygons = []
+        if boundary_lines:
+            try:
+                merged_lines = unary_union(boundary_lines)
+                found_polys = list(polygonize(merged_lines))
+                for p in found_polys:
+                    if p.is_valid and not p.is_empty and p.area > 1e-3:
+                        polygonized_polygons.append(p)
+            except Exception:
+                pass
+
+        single_polygons = []
         for item in selected:
             poly = self._item_to_shapely_polygon(item)
             if poly and poly.is_valid and not poly.is_empty:
-                polygons.append(poly)
+                single_polygons.append(poly)
+
+        polygons = polygonized_polygons if polygonized_polygons else single_polygons
 
         if not polygons:
-            QMessageBox.warning(self, "エラー", "有効な閉図形が選択されていません。")
+            QMessageBox.warning(self, "エラー", "交点や端点で囲まれた閉領域が見つかりませんでした。")
             return
 
         target_geom = None
@@ -1446,10 +1631,11 @@ class CADCanvas(QGraphicsView):
             target_geom = polygons[0]
         else:
             options = [
-                "1. 選択オブジェクト個別にハッチング",
-                "2. 外枠から内側を除外（中抜きハッチング）",
-                "3. オブジェクトの重なり部分のみ (AND)",
-                "4. オブジェクトの重なっていない部分のみ (XOR/差分)"
+                "1. 交点・端点で囲まれたすべての閉領域にハッチング",
+                "2. 選択オブジェクト個別にハッチング",
+                "3. 外枠から内側を除外（中抜きハッチング）",
+                "4. オブジェクトの重なり部分のみ (AND)",
+                "5. オブジェクトの重なっていない部分のみ (XOR/差分)"
             ]
             item_str, ok = QInputDialog.getItem(self, "ハッチング範囲の指定", "ハッチングの作図範囲を選択してください:", options, 0, False)
             if not ok: return
@@ -1457,18 +1643,23 @@ class CADCanvas(QGraphicsView):
             if item_str.startswith("1"):
                 target_geom = MultiPolygon(polygons)
             elif item_str.startswith("2"):
-                polygons.sort(key=lambda p: p.area, reverse=True)
-                outer = polygons[0]
-                for inner in polygons[1:]:
+                target_geom = MultiPolygon(single_polygons if single_polygons else polygons)
+            elif item_str.startswith("3"):
+                p_list = single_polygons if single_polygons else polygons
+                p_list.sort(key=lambda p: p.area, reverse=True)
+                outer = p_list[0]
+                for inner in p_list[1:]:
                     outer = outer.difference(inner)
                 target_geom = outer
-            elif item_str.startswith("3"):
-                target_geom = polygons[0]
-                for p in polygons[1:]:
-                    target_geom = target_geom.intersection(p)
             elif item_str.startswith("4"):
-                target_geom = polygons[0]
-                for p in polygons[1:]:
+                p_list = single_polygons if single_polygons else polygons
+                target_geom = p_list[0]
+                for p in p_list[1:]:
+                    target_geom = target_geom.intersection(p)
+            elif item_str.startswith("5"):
+                p_list = single_polygons if single_polygons else polygons
+                target_geom = p_list[0]
+                for p in p_list[1:]:
                     target_geom = target_geom.symmetric_difference(p)
 
         if target_geom is None or target_geom.is_empty:
@@ -1743,7 +1934,7 @@ class CADCanvas(QGraphicsView):
                             self.shapes.append({"type": "rect", "p1": (rect.x()+dx, rect.y()+dy), "p2": (rect.x()+dx+rect.width(), rect.y()+dx+rect.height()), "layer": self.active_layer, "color": self.current_color, "item": new_item})
         self.commit_history_record()
 
-    # --- 数値指定・一括作図機能（ピッチ連続複写対応） ---
+    # --- 数値指定・一括作図機能 ---
     def process_coordinate_input(self, x, y, is_relative=False):
         if is_relative:
             base_x, base_y = (self.start_point.x(), self.start_point.y()) if self.start_point else (self.shapes[-1]["pos"] if self.shapes and "pos" in self.shapes[-1] else (0.0, 0.0))
@@ -2239,6 +2430,18 @@ class CADCanvas(QGraphicsView):
                 last_pt = QPointF(self.poly_points[-1][0], self.poly_points[-1][1]) if self.poly_points else None
                 pos_angled = self.apply_angle_snap(last_pt, raw_pos) if last_pt else raw_pos
                 p = self.get_snapped_pos(pos_angled)
+
+                if len(self.poly_points) >= 2:
+                    start_p = QPointF(self.poly_points[0][0], self.poly_points[0][1])
+                    if math.hypot(p.x() - start_p.x(), p.y() - start_p.y()) < 1e-3:
+                        if self.mode == "POLYGON":
+                            self.finish_polyline()
+                        else:
+                            self.poly_points.append((start_p.x(), start_p.y()))
+                            self.finish_polyline()
+                        self.commit_history_record()
+                        return
+
                 self.poly_points.append((p.x(), p.y()))
                 if len(self.poly_points) > 1:
                     p1, p2 = self.poly_points[-2], self.poly_points[-1]
@@ -2308,9 +2511,17 @@ class CADCanvas(QGraphicsView):
             if self.mode in ["LINE", "LEADER", "DIMENSION", "DIM_RADIUS", "DIM_DIAMETER", "CLOUD", "ARROW"]:
                 self.temp_item = self.scene.addLine(x1, y1, x2, y2, pen_preview)
             elif self.mode == "H_LINE":
-                self.temp_item = self.scene.addLine(x1 - 5000, y1, x1 + 5000, y1, pen_preview)
+                if self.preset_line_length > 0:
+                    l_val = self.preset_line_length if x2 >= x1 else -self.preset_line_length
+                    self.temp_item = self.scene.addLine(x1, y1, x1 + l_val, y1, pen_preview)
+                else:
+                    self.temp_item = self.scene.addLine(x1 - 5000, y1, x1 + 5000, y1, pen_preview)
             elif self.mode == "V_LINE":
-                self.temp_item = self.scene.addLine(x1, y1 - 5000, x1, y1 + 5000, pen_preview)
+                if self.preset_line_length > 0:
+                    l_val = self.preset_line_length if y2 >= y1 else -self.preset_line_length
+                    self.temp_item = self.scene.addLine(x1, y1, x1, y1 + l_val, pen_preview)
+                else:
+                    self.temp_item = self.scene.addLine(x1, y1 - 5000, x1, y1 + 5000, pen_preview)
             elif self.mode in ["RECT", "ELLIPSE"]:
                 self.temp_item = self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen_preview)
             elif self.mode in ["CIRCLE", "CIRCLE_2P"]:
@@ -2394,12 +2605,22 @@ class CADCanvas(QGraphicsView):
             self.shapes.append(shape_data)
 
         elif self.mode == "H_LINE":
-            item = self.scene.addLine(x1 - 5000, y1, x1 + 5000, y1, pen)
-            self.shapes.append({"type": "line", "p1": (x1 - 5000, y1), "p2": (x1 + 5000, y1), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+            if self.preset_line_length > 0:
+                l_val = self.preset_line_length if x2 >= x1 else -self.preset_line_length
+                p_end_x = x1 + l_val
+            else:
+                x1, p_end_x = x1 - 5000, x1 + 5000
+            item = self.scene.addLine(x1, y1, p_end_x, y1, pen)
+            self.shapes.append({"type": "line", "p1": (x1, y1), "p2": (p_end_x, y1), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
 
         elif self.mode == "V_LINE":
-            item = self.scene.addLine(x1, y1 - 5000, x1, y1 + 5000, pen)
-            self.shapes.append({"type": "line", "p1": (x1, y1 - 5000), "p2": (x1, y1 + 5000), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+            if self.preset_line_length > 0:
+                l_val = self.preset_line_length if y2 >= y1 else -self.preset_line_length
+                p_end_y = y1 + l_val
+            else:
+                y1, p_end_y = y1 - 5000, y1 + 5000
+            item = self.scene.addLine(x1, y1, x1, p_end_y, pen)
+            self.shapes.append({"type": "line", "p1": (x1, y1), "p2": (x1, p_end_y), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
 
         elif self.mode == "RECT":
             rx, ry, rw, rh = min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2)
@@ -2532,27 +2753,64 @@ class CADCanvas(QGraphicsView):
         self.shapes.append({"type": "arc", "center": (vx, vy), "radius": r, "start_angle": -a1, "span_angle": -diff, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
         self.shapes.append({"type": "text", "text": val_str, "pos": (tx - 15, ty - 10), "font_size": 12, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
 
-    def add_leader_with_auto_measure(self, p1, p2):
-        auto_text = self.calculate_shape_measurements(p1)
-        if auto_text: text = auto_text
-        else:
-            input_txt, ok = QInputDialog.getText(self, "引き出し線注釈", "注釈文字を入力してください:")
-            if not ok or not input_txt: return
-            text = input_txt
+    def add_leader_with_auto_measure(self, p1, p2, text=None):
+        if text is None:
+            auto_text = self.calculate_shape_measurements(p1)
+            if auto_text: text = auto_text
+            else:
+                input_txt, ok = QInputDialog.getText(self, "引き出し線注釈", "注釈文字を入力してください:")
+                if not ok or not input_txt: return
+                text = input_txt
 
         disp_color = self.get_display_color(self.current_color)
         pen = QPen(disp_color, self.current_thickness, self.current_style)
+        
+        leader_items = []
+
         l_item = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
-        self._draw_arrow_head_shape(p1, math.atan2(p2.y() - p1.y(), p2.x() - p1.x()))
+        leader_items.append(l_item)
+
+        arrow_angle = math.atan2(p1.y() - p2.y(), p1.x() - p2.x())
+        head_items = self._draw_arrow_head_shape(p1, arrow_angle)
+        leader_items.extend(head_items)
+
         landing = 40 if p2.x() >= p1.x() else -40
         p3_x = p2.x() + landing
-        self.scene.addLine(p2.x(), p2.y(), p3_x, p2.y(), pen)
+        land_item = self.scene.addLine(p2.x(), p2.y(), p3_x, p2.y(), pen)
+        leader_items.append(land_item)
+
+        font_sz = int(max(11, self.current_thickness * 4))
         t_item = self.scene.addText(text)
         t_item.setDefaultTextColor(disp_color)
-        t_item.setFont(QFont("Meiryo", int(max(11, self.current_thickness * 4))))
+        t_item.setFont(QFont("Meiryo", font_sz))
         rect = t_item.boundingRect()
-        t_item.setPos(p2.x() if landing > 0 else (p3_x - rect.width()), p2.y() - rect.height() + (rect.height() * 0.15))
-        self.shapes.append({"type": "leader", "p1": (p1.x(), p1.y()), "p2": (p2.x(), p2.y()), "text": text, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": l_item})
+        t_pos_x = p2.x() if landing > 0 else (p3_x - rect.width())
+        t_pos_y = p2.y() - rect.height() + (rect.height() * 0.15)
+        t_item.setPos(t_pos_x, t_pos_y)
+        leader_items.append(t_item)
+
+        group = self.scene.createItemGroup(leader_items)
+        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+
+        shape_data = {
+            "type": "leader", 
+            "p1": (p1.x(), p1.y()), 
+            "p2": (p2.x(), p2.y()), 
+            "p3": (p3_x, p2.y()),
+            "text": text, 
+            "font_size": font_sz,
+            "layer": self.active_layer, 
+            "color": self.current_color, 
+            "thickness": self.current_thickness, 
+            "style": self.current_style, 
+            "item": group
+        }
+
+        existing = next((s for s in self.shapes if s.get("item") == group), None)
+        if not existing:
+            self.shapes.append(shape_data)
+        return group
 
     def _shape_to_shapely(self, shape):
         stype = shape.get("type")
@@ -2764,6 +3022,14 @@ class CADCanvas(QGraphicsView):
 
     def get_snap_points(self, current_pos=None):
         snaps = []
+
+        if getattr(self, 'poly_points', None):
+            for i, p_pt in enumerate(self.poly_points):
+                snaps.append((p_pt[0], p_pt[1], "END"))
+                if i > 0:
+                    prev_pt = self.poly_points[i - 1]
+                    snaps.append(((prev_pt[0] + p_pt[0]) / 2.0, (prev_pt[1] + p_pt[1]) / 2.0, "MID"))
+
         for shape in self.shapes:
             stype = shape.get("type")
             if stype in ["line", "dimension", "arrow", "leader"]:
@@ -3064,19 +3330,29 @@ class CADCanvas(QGraphicsView):
                                 pixmap = QPixmap(fpath)
                                 img_w, img_h = pixmap.width(), pixmap.height()
 
-                            px, py = shape["pos"][0], shape["pos"][1]
-                            sc = shape.get("scale", 1.0)
-                            w_units = img_w * sc
-                            h_units = img_h * sc
+                            item = shape.get("item")
+                            if item:
+                                scene_tf = item.sceneTransform()
+                                p_bl = scene_tf.map(QPointF(0, img_h))
+                                p_br = scene_tf.map(QPointF(img_w, img_h))
+                                p_tl = scene_tf.map(QPointF(0, 0))
 
-                            image_def = doc.add_image_def(filename=fpath, size_in_pixel=(img_w, img_h))
-                            # キャンバス(Top-Left: px, py) -> DXF(Bottom-Left: px, -py - h_units)へ補正変換
-                            msp.add_image(
-                                image_def=image_def,
-                                insert=(px, -py - h_units),
-                                size_in_units=(w_units, h_units),
-                                dxfattribs=attribs
-                            )
+                                dxf_insert = (p_bl.x(), -p_bl.y())
+                                u_vec = (p_br.x() - p_bl.x(), -(p_br.y() - p_bl.y()))
+                                v_vec = (p_tl.x() - p_bl.x(), -(p_tl.y() - p_bl.y()))
+
+                                w_units = math.hypot(u_vec[0], u_vec[1])
+                                h_units = math.hypot(v_vec[0], v_vec[1])
+
+                                image_def = doc.add_image_def(filename=fpath, size_in_pixel=(img_w, img_h))
+                                image_entity = msp.add_image(
+                                    image_def=image_def,
+                                    insert=dxf_insert,
+                                    size_in_units=(w_units, h_units),
+                                    dxfattribs=attribs
+                                )
+                                image_entity.dxf.u_pixel = (u_vec[0] / img_w, u_vec[1] / img_w)
+                                image_entity.dxf.v_pixel = (v_vec[0] / img_h, v_vec[1] / img_h)
                         except Exception:
                             pass
 
@@ -3092,10 +3368,32 @@ class CADCanvas(QGraphicsView):
                         my = -(shape["p1"][1] + shape["p2"][1]) / 2.0
                         msp.add_text(val_str, dxfattribs={'height': 12, 'insert': (mx, my)} | attribs)
                 elif stype == "leader":
-                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                    p1 = shape["p1"]
+                    p2 = shape["p2"]
+                    p3 = shape.get("p3", (p2[0] + (40 if p2[0] >= p1[0] else -40), p2[1]))
                     txt = shape.get("text", "")
+
+                    msp.add_line((p1[0], -p1[1]), (p2[0], -p2[1]), dxfattribs=attribs)
+                    msp.add_line((p2[0], -p2[1]), (p3[0], -p3[1]), dxfattribs=attribs)
+
+                    ang = math.atan2(p1[1] - p2[1], p1[0] - p2[0])
+                    size = max(10, shape.get("thickness", self.current_thickness) * 3.5)
+                    h_type = shape.get("arrow_head_type", self.arrow_head_type)
+
+                    p1_dxf = (p1[0], -p1[1])
+                    pa1 = (p1[0] - size * math.cos(ang - math.pi / 6), -(p1[1] - size * math.sin(ang - math.pi / 6)))
+                    pa2 = (p1[0] - size * math.cos(ang + math.pi / 6), -(p1[1] - size * math.sin(ang + math.pi / 6)))
+
+                    if h_type == "FILLED":
+                        msp.add_solid([p1_dxf, pa1, pa2], dxfattribs=attribs)
+                    else:
+                        msp.add_line(p1_dxf, pa1, dxfattribs=attribs)
+                        msp.add_line(p1_dxf, pa2, dxfattribs=attribs)
+
                     if txt:
-                        msp.add_text(txt, dxfattribs={'height': 12, 'insert': (shape["p2"][0], -shape["p2"][1])} | attribs)
+                        tx = p2[0] if p3[0] >= p2[0] else p3[0]
+                        ty = -p2[1] + 2
+                        msp.add_text(txt, dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (tx, ty)} | attribs)
                 elif stype == "rect":
                     x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]
                     msp.add_lwpolyline([(x1, -y1), (x2, -y1), (x2, -y2), (x1, -y2)], close=True, dxfattribs=attribs)
