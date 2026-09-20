@@ -19,22 +19,22 @@ from PyQt6.QtGui import (QPen, QColor, QPixmap, QPolygonF, QBrush, QFont, QImage
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 
+
 def _clean_for_json(obj):
-    """QColorやPenStyleなどの特殊オブジェクトを安全なJSON互換データに変換"""
+    """JSONエンコード可能な型へ安全にシリアライズ"""
     if isinstance(obj, QColor):
         return obj.name()
     elif hasattr(obj, "value"):
         return obj.value
     elif isinstance(obj, dict):
-        return {k: _clean_for_json(v) for k, v in obj.items() if k != "item" and k != "head_items"}
-    elif isinstance(obj, list):
-        return [_clean_for_json(i) for i in obj]
-    elif isinstance(obj, tuple):
+        return {k: _clean_for_json(v) for k, v in obj.items() if k not in ("item", "head_items")}
+    elif isinstance(obj, (list, tuple)):
         return [_clean_for_json(i) for i in obj]
     return obj
 
+
 class CustomPixmapItem(QGraphicsPixmapItem):
-    """アフィン変換（QTransform）対応の完全同期型インタラクティブ PixmapItem"""
+    """アフィン変換（QTransform）対応の完全同期型 PixmapItem"""
     def __init__(self, pixmap, parent=None):
         super().__init__(pixmap, parent)
         self.setFlags(
@@ -45,11 +45,6 @@ class CustomPixmapItem(QGraphicsPixmapItem):
         self.setAcceptHoverEvents(True)
         self.handle_size = 14.0
         self.active_handle = None
-        self.drag_start_scene_pos = None
-        self.initial_scale = 1.0
-        self.initial_rotation = 0.0
-        self.center_scene_pos = None
-        self.initial_dist = 1.0
         self.setTransformOriginPoint(0, 0)
 
     def setPixmap(self, pixmap):
@@ -77,15 +72,12 @@ class CustomPixmapItem(QGraphicsPixmapItem):
             painter.setBrush(QBrush(QColor(0, 120, 215)))
             painter.setPen(QPen(QColor(255, 255, 255), 1.0 / sc))
 
-            handles = self._get_handle_rects(rect, s)
-            for h_rect in handles.values():
+            for h_rect in self._get_handle_rects(rect, s).values():
                 painter.drawRect(h_rect)
 
-            rot_pt = self._get_rotation_handle_pos(rect, s)
-            top_mid = QPointF(rect.center().x(), rect.top())
-            painter.drawLine(top_mid, rot_pt)
+            rot_pt = QPointF(rect.center().x(), rect.top() - s * 2.5)
+            painter.drawLine(QPointF(rect.center().x(), rect.top()), rot_pt)
             painter.drawEllipse(rot_pt, s / 2.0, s / 2.0)
-
             painter.restore()
 
     def _get_handle_rects(self, rect, s):
@@ -102,16 +94,14 @@ class CustomPixmapItem(QGraphicsPixmapItem):
     def hoverMoveEvent(self, event):
         if self.isSelected():
             rect = super().boundingRect()
-            sc = max(0.001, self.scale())
-            s = self.handle_size / sc
-            handles = self._get_handle_rects(rect, s)
+            s = self.handle_size / max(0.001, self.scale())
             rot_pos = self._get_rotation_handle_pos(rect, s)
             pos = event.pos()
 
             if math.hypot(pos.x() - rot_pos.x(), pos.y() - rot_pos.y()) <= s:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 return
-            for h_rect in handles.values():
+            for h_rect in self._get_handle_rects(rect, s).values():
                 if h_rect.contains(pos):
                     self.setCursor(Qt.CursorShape.SizeAllCursor)
                     return
@@ -121,23 +111,19 @@ class CustomPixmapItem(QGraphicsPixmapItem):
     def mousePressEvent(self, event):
         if self.isSelected() and event.button() == Qt.MouseButton.LeftButton:
             rect = super().boundingRect()
-            sc = max(0.001, self.scale())
-            s = self.handle_size / sc
+            s = self.handle_size / max(0.001, self.scale())
             handles = self._get_handle_rects(rect, s)
             rot_pos = self._get_rotation_handle_pos(rect, s)
             pos = event.pos()
 
             if math.hypot(pos.x() - rot_pos.x(), pos.y() - rot_pos.y()) <= s:
                 self.active_handle = "ROTATE"
-                self.drag_start_scene_pos = event.scenePos()
-                self.initial_rotation = self.rotation()
                 event.accept()
                 return
 
             for h_name, h_rect in handles.items():
                 if h_rect.contains(pos):
                     self.active_handle = h_name
-                    self.drag_start_scene_pos = event.scenePos()
                     self.initial_scale = self.scale()
                     self.center_scene_pos = self.scenePos()
                     self.initial_dist = math.hypot(
@@ -152,19 +138,16 @@ class CustomPixmapItem(QGraphicsPixmapItem):
 
     def mouseMoveEvent(self, event):
         if self.active_handle == "ROTATE":
-            rect = super().boundingRect()
-            center_scene = self.mapToScene(rect.center())
+            center_scene = self.mapToScene(super().boundingRect().center())
             curr_pos = event.scenePos()
             angle = math.degrees(math.atan2(curr_pos.y() - center_scene.y(), curr_pos.x() - center_scene.x())) + 90.0
             self.setRotation(angle)
             return
 
         elif self.active_handle in ["TL", "TR", "BL", "BR"]:
-            curr_pos = event.scenePos()
-            curr_dist = math.hypot(curr_pos.x() - self.center_scene_pos.x(), curr_pos.y() - self.center_scene_pos.y())
-            if self.initial_dist > 0:
-                scale_val = self.initial_scale * (curr_dist / self.initial_dist)
-                self.setScale(max(0.01, scale_val))
+            curr_dist = math.hypot(event.scenePos().x() - self.center_scene_pos.x(), event.scenePos().y() - self.center_scene_pos.y())
+            if getattr(self, "initial_dist", 0) > 0:
+                self.setScale(max(0.01, self.initial_scale * (curr_dist / self.initial_dist)))
             return
 
         super().mouseMoveEvent(event)
@@ -175,16 +158,14 @@ class CustomPixmapItem(QGraphicsPixmapItem):
 
 
 class TextEditDialog(QDialog):
-    """文章入力・再編集用ダイアログ"""
+    """文字編集ダイアログ"""
     def __init__(self, parent=None, text="", font_size=12, color=None):
         super().__init__(parent)
         self.setWindowTitle("文章の入力・編集")
         self.resize(420, 350)
-
         self.selected_color = QColor(color) if color else QColor(255, 0, 0)
 
         layout = QVBoxLayout(self)
-
         cfg_layout = QHBoxLayout()
         cfg_layout.addWidget(QLabel("文字サイズ(pt):"))
         self.size_spin = QSpinBox()
@@ -197,11 +178,10 @@ class TextEditDialog(QDialog):
         self.update_color_button_style()
         self.color_btn.clicked.connect(self.choose_color)
         cfg_layout.addWidget(self.color_btn)
-
         cfg_layout.addStretch()
         layout.addLayout(cfg_layout)
 
-        layout.addWidget(QLabel("テキスト (Enter / Shift+Enter で改行):"))
+        layout.addWidget(QLabel("テキスト:"))
         self.text_edit = QTextEdit()
         self.text_edit.setPlainText(text)
         layout.addWidget(self.text_edit)
@@ -231,72 +211,49 @@ class TextEditDialog(QDialog):
 
 
 class TableEditDialog(QDialog):
-    """表データのグラフィカル再編集ダイアログ"""
+    """表データ編集ダイアログ"""
     def __init__(self, parent=None, grid_data=None, cell_w=100, cell_h=30, align="CENTER", font_size=12, color=None):
         super().__init__(parent)
         self.setWindowTitle("表データの再編集")
         self.resize(650, 480)
-
         self.grid_data = copy.deepcopy(grid_data) if grid_data else [[""]]
-        self.cell_w = cell_w
-        self.cell_h = cell_h
-        self.align = align
-        self.font_size = font_size
         self.selected_color = QColor(color) if color else QColor(0, 0, 0)
 
         main_layout = QVBoxLayout(self)
-
         cfg_layout = QHBoxLayout()
-        cfg_layout.addWidget(QLabel("セル幅(mm):"))
         self.w_spin = QDoubleSpinBox()
-        self.w_spin.setRange(10.0, 2000.0)
-        self.w_spin.setValue(float(self.cell_w))
+        self.w_spin.setRange(10.0, 2000.0); self.w_spin.setValue(float(cell_w))
+        cfg_layout.addWidget(QLabel("セル幅:"))
         cfg_layout.addWidget(self.w_spin)
 
-        cfg_layout.addWidget(QLabel("セル高(mm):"))
         self.h_spin = QDoubleSpinBox()
-        self.h_spin.setRange(5.0, 1000.0)
-        self.h_spin.setValue(float(self.cell_h))
+        self.h_spin.setRange(5.0, 1000.0); self.h_spin.setValue(float(cell_h))
+        cfg_layout.addWidget(QLabel("セル高:"))
         cfg_layout.addWidget(self.h_spin)
 
-        cfg_layout.addWidget(QLabel("文字サイズ(pt):"))
         self.font_spin = QSpinBox()
-        self.font_spin.setRange(6, 200)
-        self.font_spin.setValue(int(self.font_size))
+        self.font_spin.setRange(6, 200); self.font_spin.setValue(int(font_size))
+        cfg_layout.addWidget(QLabel("文字サイズ:"))
         cfg_layout.addWidget(self.font_spin)
 
-        cfg_layout.addWidget(QLabel("文字色:"))
         self.color_btn = QPushButton(" 色を選択 ")
         self.update_color_button_style()
         self.color_btn.clicked.connect(self.choose_color)
         cfg_layout.addWidget(self.color_btn)
 
-        cfg_layout.addWidget(QLabel("文字揃え:"))
         self.align_combo = QComboBox()
-        self.align_combo.addItems(["中央寄せ (CENTER)", "左寄せ (LEFT)", "右寄せ (RIGHT)"])
+        self.align_combo.addItems(["中央 (CENTER)", "左寄せ (LEFT)", "右寄せ (RIGHT)"])
         align_map = {"CENTER": 0, "LEFT": 1, "RIGHT": 2}
         self.align_combo.setCurrentIndex(align_map.get(str(align).upper(), 0))
         cfg_layout.addWidget(self.align_combo)
-
         main_layout.addLayout(cfg_layout)
 
         btn_layout = QHBoxLayout()
-        add_row_btn = QPushButton("＋ 行追加")
-        add_row_btn.clicked.connect(self.add_row)
-        del_row_btn = QPushButton("－ 行削除")
-        del_row_btn.clicked.connect(self.del_row)
-        add_col_btn = QPushButton("＋ 列追加")
-        add_col_btn.clicked.connect(self.add_col)
-        del_col_btn = QPushButton("－ 列削除")
-        del_col_btn.clicked.connect(self.del_col)
-        auto_fit_btn = QPushButton("📐 文字に合わせ自動調整")
-        auto_fit_btn.clicked.connect(self.auto_fit_cell_size)
-
-        btn_layout.addWidget(add_row_btn)
-        btn_layout.addWidget(del_row_btn)
-        btn_layout.addWidget(add_col_btn)
-        btn_layout.addWidget(del_col_btn)
-        btn_layout.addWidget(auto_fit_btn)
+        add_r = QPushButton("＋ 行追加"); add_r.clicked.connect(lambda: self.table_widget.insertRow(self.table_widget.rowCount()))
+        del_r = QPushButton("－ 行削除"); del_r.clicked.connect(lambda: self.table_widget.removeRow(max(0, self.table_widget.currentRow())))
+        add_c = QPushButton("＋ 列追加"); add_c.clicked.connect(lambda: self.table_widget.insertColumn(self.table_widget.columnCount()))
+        del_c = QPushButton("－ 列削除"); del_c.clicked.connect(lambda: self.table_widget.removeColumn(max(0, self.table_widget.currentColumn())))
+        btn_layout.addWidget(add_r); btn_layout.addWidget(del_r); btn_layout.addWidget(add_c); btn_layout.addWidget(del_c)
         main_layout.addLayout(btn_layout)
 
         self.table_widget = QTableWidget()
@@ -304,13 +261,9 @@ class TableEditDialog(QDialog):
         main_layout.addWidget(self.table_widget)
 
         dlg_btns = QHBoxLayout()
-        ok_btn = QPushButton("OK (表を更新)")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("キャンセル")
-        cancel_btn.clicked.connect(self.reject)
-        dlg_btns.addStretch()
-        dlg_btns.addWidget(ok_btn)
-        dlg_btns.addWidget(cancel_btn)
+        ok_btn = QPushButton("OK"); ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("キャンセル"); cancel_btn.clicked.connect(self.reject)
+        dlg_btns.addStretch(); dlg_btns.addWidget(ok_btn); dlg_btns.addWidget(cancel_btn)
         main_layout.addLayout(dlg_btns)
 
     def choose_color(self):
@@ -324,63 +277,22 @@ class TableEditDialog(QDialog):
         self.color_btn.setStyleSheet(f"background-color: {self.selected_color.name()}; color: {txt_col}; font-weight: bold; border: 1px solid #888;")
 
     def populate_table(self):
-        rows = len(self.grid_data)
-        cols = max(len(r) for r in self.grid_data) if self.grid_data else 1
-        self.table_widget.setRowCount(rows)
-        self.table_widget.setColumnCount(cols)
+        rows, cols = len(self.grid_data), max(len(r) for r in self.grid_data) if self.grid_data else 1
+        self.table_widget.setRowCount(rows); self.table_widget.setColumnCount(cols)
         for r in range(rows):
             for c in range(cols):
                 val = self.grid_data[r][c] if c < len(self.grid_data[r]) else ""
                 self.table_widget.setItem(r, c, QTableWidgetItem(str(val)))
 
-    def add_row(self): self.table_widget.insertRow(self.table_widget.rowCount())
-    def del_row(self):
-        curr = self.table_widget.currentRow()
-        if curr >= 0: self.table_widget.removeRow(curr)
-        elif self.table_widget.rowCount() > 0: self.table_widget.removeRow(self.table_widget.rowCount() - 1)
-
-    def add_col(self): self.table_widget.insertColumn(self.table_widget.columnCount())
-    def del_col(self):
-        curr = self.table_widget.currentColumn()
-        if curr >= 0: self.table_widget.removeColumn(curr)
-        elif self.table_widget.columnCount() > 0: self.table_widget.removeColumn(self.table_widget.columnCount() - 1)
-
-    def auto_fit_cell_size(self):
-        f_size = self.font_spin.value()
-        max_lines = 1
-        max_chars = 1
-        for r in range(self.table_widget.rowCount()):
-            for c in range(self.table_widget.columnCount()):
-                item = self.table_widget.item(r, c)
-                if item and item.text():
-                    lines = item.text().split("\n")
-                    max_lines = max(max_lines, len(lines))
-                    for line in lines:
-                        max_chars = max(max_chars, len(line))
-        calc_w = max(40.0, max_chars * f_size * 0.9 + 20.0)
-        calc_h = max(20.0, max_lines * f_size * 1.5 + 10.0)
-        self.w_spin.setValue(calc_w)
-        self.h_spin.setValue(calc_h)
-
     def get_result(self):
-        rows = self.table_widget.rowCount()
-        cols = self.table_widget.columnCount()
-        res_grid = []
-        for r in range(rows):
-            row_vals = []
-            for c in range(cols):
-                item = self.table_widget.item(r, c)
-                row_vals.append(item.text() if item else "")
-            res_grid.append(row_vals)
-
+        rows, cols = self.table_widget.rowCount(), self.table_widget.columnCount()
+        res_grid = [[self.table_widget.item(r, c).text() if self.table_widget.item(r, c) else "" for c in range(cols)] for r in range(rows)]
         align_list = ["CENTER", "LEFT", "RIGHT"]
-        res_align = align_list[self.align_combo.currentIndex()]
-        return res_grid, self.w_spin.value(), self.h_spin.value(), res_align, self.font_spin.value(), self.selected_color
+        return res_grid, self.w_spin.value(), self.h_spin.value(), align_list[self.align_combo.currentIndex()], self.font_spin.value(), self.selected_color
 
 
 class CADCanvas(QGraphicsView):
     """建築・施工用 朱書きCADシステム 統合キャンバスクラス"""
-    
     mode_changed = pyqtSignal(str)
 
     def __init__(self):
@@ -409,40 +321,21 @@ class CADCanvas(QGraphicsView):
         self.scale_factor = 1.0
         self.is_dark_mode = False
 
-        self.undo_stack = []
-        self.redo_stack = []
-        self.copied_shapes_buffer = []
+        self.undo_stack, self.redo_stack, self.copied_shapes_buffer = [], [], []
         self._before_items = set()
         self._before_shapes_len = 0
 
-        self.arrow_head_type = "FILLED"
-        self.arrow_direction = "END"
-
-        self.preset_line_length = 0.0  # 水平・垂直線の距離指定 (0.0で画面全体/自動)
-        self.offset_dist = 20.0
-
-        self.cloud_pitch = 20.0
-        self.cloud_arc_height = 8.0
+        self.arrow_head_type, self.arrow_direction = "FILLED", "END"
+        self.preset_line_length, self.offset_dist = 0.0, 20.0
+        self.cloud_pitch, self.cloud_arc_height = 20.0, 8.0
         self.preset_rect_w, self.preset_rect_h = 100.0, 50.0
         self.preset_circle_r = 40.0
         self.preset_arc_r, self.preset_arc_start, self.preset_arc_span = 40.0, 0.0, 90.0
         self.preset_poly_sides, self.preset_poly_r, self.preset_poly_angle = 6, 40.0, 0.0
-        self.rotate_angle = 45.0
-        self.scale_factor_val = 1.5
-        self.array_rows, self.array_cols = 3, 3
-        self.array_row_gap, self.array_col_gap = 50.0, 50.0
-        self.hatch_angle = 45.0
-        self.hatch_spacing = 15.0
-        self.hatch_color = QColor(255, 0, 0)
-        self.hatch_thickness = 1
-        self.hatch_style = Qt.PenStyle.SolidLine
-        self.fillet_radius = 50.0
-        self.chamfer_dist = 50.0
-
-        self.trace_canny_low = 20
-        self.trace_canny_high = 80
-        self.trace_min_line_length = 6
-        self.trace_max_line_gap = 4
+        self.rotate_angle, self.scale_factor_val = 45.0, 1.5
+        self.array_rows, self.array_cols, self.array_row_gap, self.array_col_gap = 3, 3, 50.0, 50.0
+        self.hatch_angle, self.hatch_spacing, self.hatch_color = 45.0, 15.0, QColor(255, 0, 0)
+        self.hatch_thickness, self.hatch_style = 1, Qt.PenStyle.SolidLine
 
         self.show_paper_guide = False
         self.paper_size_id = QPageSize.PageSizeId.A4
@@ -505,1201 +398,57 @@ class CADCanvas(QGraphicsView):
                 if hasattr(item, "rotation"): shape["rotation"] = item.rotation()
                 if hasattr(item, "opacity"): shape["opacity"] = item.opacity()
 
-    # --- 新規作成・保存・読み込み ---
-    def new_project(self):
-        if self.shapes or any(not isinstance(i, QGraphicsItemGroup) for i in self.scene.items()):
-            res = QMessageBox.question(
-                self, "新規作成", 
-                "現在の図面を全消去して新規作成しますか？\n（保存していない変更は失われます）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if res != QMessageBox.StandardButton.Yes: return False
+    def safe_remove_item(self, item):
+        """グラフィックス要素（単体およびリスト）を安全にシーンから削除"""
+        if isinstance(item, list):
+            for i in item:
+                if i and i.scene() == self.scene:
+                    self.scene.removeItem(i)
+        elif item and item.scene() == self.scene:
+            self.scene.removeItem(item)
 
-        self.scene.clear()
-        self.shapes.clear()
-        self.undo_stack.clear()
-        self.redo_stack.clear()
-        self.paper_guide_item = None
-        self.custom_print_rect_item = None
-        self.set_mode("SELECT")
-        return True
-
-    def save_project_json(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "プロジェクトを保存", "", "CAD Project Files (*.json)")
-        if not file_path: return
-        try:
-            self._sync_item_transforms()
-            data = {
-                "version": "1.0",
-                "layers": _clean_for_json(self.layers),
-                "blocks": _clean_for_json(self.blocks),
-                "shapes": _clean_for_json(self.shapes),
-                "paper_scale": self.paper_scale,
-                "active_layer": self.active_layer
-            }
-
-            def cad_json_default(obj):
-                if isinstance(obj, QColor):
-                    return obj.name()
-                if hasattr(obj, "value"):
-                    return obj.value
-                raise TypeError(f"Type {type(obj)} not serializable")
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False, default=cad_json_default)
-            QMessageBox.information(self, "成功", f"プロジェクトを保存しました:\n{file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"保存失敗:\n{e}")
-
-    def load_project_json(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "プロジェクトを開く", "", "CAD Project Files (*.json)")
-        if not file_path: return
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError as e:
-            QMessageBox.critical(self, "エラー", f"ファイルが壊れているため読み込めません:\n{e}")
+    # --- 線の結合 & 中心線生成 (コンテキストメニュー用) ---
+    def join_selected_lines(self):
+        selected = self.scene.selectedItems()
+        target_shapes = [s for s in self.shapes if s.get("item") in selected and s.get("type") in ["line", "polyline"]]
+        if len(target_shapes) < 2:
+            QMessageBox.warning(self, "通知", "結合するには2本以上の線分を選択してください。")
             return
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"読み込み失敗:\n{e}")
-            return
-
-        try:
-            self.scene.clear(); self.shapes.clear()
-            self.paper_guide_item, self.custom_print_rect_item = None, None
-            self.layers.clear()
-
-            for name, props in data.get("layers", {}).items():
-                style_val = props.get("style", 1)
-                try: style = Qt.PenStyle(int(style_val))
-                except: style = Qt.PenStyle.SolidLine
-                self.layers[name] = {
-                    "color": QColor(props.get("color", "#000000")),
-                    "thickness": props.get("thickness", 2),
-                    "style": style,
-                    "visible": props.get("visible", True),
-                    "locked": props.get("locked", False),
-                    "printable": props.get("printable", True)
-                }
-
-            self.active_layer = data.get("active_layer", "0")
-            self.paper_scale = data.get("paper_scale", 100)
-            self.blocks = data.get("blocks", {})
-
-            for s in data.get("shapes", []):
-                color_val = s.get("color", "#FF0000")
-                s["color"] = QColor(color_val) if isinstance(color_val, str) else color_val
-                
-                style_val = s.get("style", 1)
-                try: style = Qt.PenStyle(int(style_val))
-                except: style = Qt.PenStyle.SolidLine
-                s["style"] = style
-
-                stype = s.get("type")
-                color = self.get_display_color(s["color"])
-                thickness = s.get("thickness", self.current_thickness)
-                pen = QPen(color, thickness, style)
-
-                if stype == "image":
-                    fpath = s.get("file_path", "")
-                    if fpath and os.path.exists(fpath):
-                        pixmap = None
-                        if fpath.lower().endswith('.pdf'):
-                            try:
-                                doc_pdf = pymupdf.open(fpath)
-                                pix = doc_pdf[0].get_pixmap(dpi=150)
-                                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-                                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
-                            except Exception: pass
-                        else:
-                            pixmap = QPixmap(fpath)
-
-                        if pixmap and not pixmap.isNull():
-                            item = CustomPixmapItem(pixmap)
-                            pos_val = s.get("pos", (0, 0))
-                            item.setPos(pos_val[0], pos_val[1])
-
-                            if "transform" in s:
-                                m = s["transform"]
-                                item.setTransform(QTransform(m[0], m[1], m[2], m[3], m[4], m[5]))
-                            else:
-                                item.setScale(s.get("scale", 1.0))
-                                item.setRotation(s.get("rotation", 0.0))
-
-                            item.setOpacity(s.get("opacity", 1.0))
-
-                            if s.get("layer") == "背景図面":
-                                item.setZValue(-100)
-
-                            is_movable = (self.mode == "SELECT" and not self.layers.get(s.get("layer", "0"), {}).get("locked", False))
-                            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_movable)
-                            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_movable)
-
-                            self.scene.addItem(item)
-                            s["item"] = item
-                            self.shapes.append(s)
-                    continue
-
-                elif stype == "dimension":
-                    self.create_autocad_dimension(QPointF(s["p1"][0], s["p1"][1]), QPointF(s["p2"][0], s["p2"][1]))
-                    continue
-                elif stype == "arrow":
-                    item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
-                    s["item"] = item
-                    self._update_arrow_shape_graphics(s)
-                    self.shapes.append(s)
-                    continue
-                elif stype == "leader":
-                    self.add_leader_with_auto_measure(QPointF(s["p1"][0], s["p1"][1]), QPointF(s["p2"][0], s["p2"][1]), text=s.get("text"))
-                    continue
-                elif stype == "rect":
-                    x1, y1, x2, y2 = s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1]
-                    item = self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen)
-                elif stype == "circle":
-                    cx, cy, r = s["center"][0], s["center"][1], s["radius"]
-                    item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
-                elif stype == "arc":
-                    cx, cy, r = s["center"][0], s["center"][1], s["radius"]
-                    st, sp = s["start_angle"], s["span_angle"]
-                    path = QPainterPath()
-                    path.arcMoveTo(cx - r, cy - r, 2 * r, 2 * r, st)
-                    path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, sp)
-                    item = self.scene.addPath(path, pen)
-                elif stype == "table":
-                    grid_data = s.get("grid_data", [[""]])
-                    cell_w = s.get("cell_w", 100)
-                    cell_h = s.get("cell_h", 30)
-                    align = s.get("align", "CENTER")
-                    f_size = s.get("font_size", 12)
-                    t_col = s.get("color", self.current_color)
-                    pos_val = s.get("pos", (0, 0))
-                    self.add_table_data(grid_data, cell_w, cell_h, QPointF(pos_val[0], pos_val[1]), align=align, font_size=f_size, color=t_col, target_shape=s)
-                    continue
-                elif stype == "polyline":
-                    pts = [QPointF(pt[0], pt[1]) for pt in s["points"]]
-                    if s.get("is_closed"): item = self.scene.addPolygon(pts, pen)
-                    else:
-                        path = QPainterPath(); path.moveTo(pts[0])
-                        for pt in pts[1:]: path.lineTo(pt)
-                        item = self.scene.addPath(path, pen)
-                elif stype == "text":
-                    item = self.scene.addText(s["text"])
-                    item.setDefaultTextColor(color); item.setFont(QFont("Meiryo", int(s.get("font_size", 12))))
-                    item.setPos(s["pos"][0], s["pos"][1])
-                elif stype == "line":
-                    item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
-
-                s["item"] = item
-                self.shapes.append(s)
-
-            self.apply_layer_states()
-            QMessageBox.information(self, "成功", f"プロジェクトを読み込みました:\n{file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"プロジェクトデータの構造解析に失敗しました:\n{e}")
-
-    # --- DXFファイルのインポート ---
-    def import_dxf_file(self, file_path=None):
-        if not file_path:
-            file_path, _ = QFileDialog.getOpenFileName(self, "DXFファイルを開く", "", "DXF Files (*.dxf)")
-        if not file_path or not os.path.exists(file_path): return
-
-        try:
-            doc = ezdxf.readfile(file_path)
-            msp = doc.modelspace()
-            self.start_history_record()
-
-            for entity in msp:
-                dxftype = entity.dxftype()
-                layer_name = entity.dxf.layer if hasattr(entity.dxf, 'layer') else "0"
-                if layer_name not in self.layers:
-                    self.layers[layer_name] = {"color": QColor(0, 0, 0), "thickness": 2, "style": Qt.PenStyle.SolidLine, "visible": True, "locked": False, "printable": True}
-
-                color = self.layers[layer_name]["color"]
-                pen = QPen(self.get_display_color(color), self.current_thickness, self.current_style)
-
-                if dxftype == 'LINE':
-                    p1 = (entity.dxf.start.x, -entity.dxf.start.y)
-                    p2 = (entity.dxf.end.x, -entity.dxf.end.y)
-                    item = self.scene.addLine(p1[0], p1[1], p2[0], p2[1], pen)
-                    self.shapes.append({"type": "line", "p1": p1, "p2": p2, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-
-                elif dxftype == 'CIRCLE':
-                    cx, cy = entity.dxf.center.x, -entity.dxf.center.y
-                    r = entity.dxf.radius
-                    item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
-                    self.shapes.append({"type": "circle", "center": (cx, cy), "radius": r, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-
-                elif dxftype == 'ARC':
-                    cx, cy = entity.dxf.center.x, -entity.dxf.center.y
-                    r = entity.dxf.radius
-                    st = -entity.dxf.start_angle
-                    end_a = -entity.dxf.end_angle
-                    span = (end_a - st) % 360
-                    if span == 0: span = -360
-                    path = QPainterPath()
-                    path.arcMoveTo(cx - r, cy - r, 2 * r, 2 * r, st)
-                    path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, span)
-                    item = self.scene.addPath(path, pen)
-                    self.shapes.append({"type": "arc", "center": (cx, cy), "radius": r, "start_angle": st, "span_angle": span, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-
-                elif dxftype in ['LWPOLYLINE', 'POLYLINE']:
-                    pts = [(p[0], -p[1]) for p in entity.get_points()]
-                    is_closed = entity.is_closed
-                    qpts = [QPointF(px, py) for px, py in pts]
-                    if is_closed:
-                        item = self.scene.addPolygon(QPolygonF(qpts), pen)
-                    else:
-                        path = QPainterPath()
-                        if qpts:
-                            path.moveTo(qpts[0])
-                            for pt in qpts[1:]: path.lineTo(pt)
-                        item = self.scene.addPath(path, pen)
-                    self.shapes.append({"type": "polyline", "points": pts, "is_closed": is_closed, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-
-                elif dxftype in ['TEXT', 'MTEXT']:
-                    txt = entity.dxf.text if dxftype == 'TEXT' else entity.text
-                    pos = (entity.dxf.insert.x, -entity.dxf.insert.y) if hasattr(entity.dxf, 'insert') else (0, 0)
-                    t_item = self.scene.addText(txt)
-                    t_item.setDefaultTextColor(self.get_display_color(color))
-                    t_item.setFont(QFont("Meiryo", 12))
-                    t_item.setPos(pos[0], pos[1])
-                    self.shapes.append({"type": "text", "text": txt, "pos": pos, "font_size": 12, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
-
-                elif dxftype == 'IMAGE':
-                    image_def = entity.image_def
-                    if image_def:
-                        fpath = image_def.dxf.filename
-                        if fpath and os.path.exists(fpath):
-                            pixmap = QPixmap(fpath)
-                            if not pixmap.isNull():
-                                img_w, img_h = pixmap.width(), pixmap.height()
-                                dxf_bl = entity.dxf.insert
-                                u_pix = getattr(entity.dxf, 'u_pixel', (1.0, 0.0))
-                                v_pix = getattr(entity.dxf, 'v_pixel', (0.0, 1.0))
-
-                                dxf_tl_x = dxf_bl.x + v_pix[0] * img_h
-                                dxf_tl_y = dxf_bl.y + v_pix[1] * img_h
-
-                                canvas_px = dxf_tl_x
-                                canvas_py = -dxf_tl_y
-
-                                m11 = u_pix[0]
-                                m12 = -u_pix[1]
-                                m21 = -v_pix[0]
-                                m22 = v_pix[1]
-
-                                item = CustomPixmapItem(pixmap)
-                                item.setPos(canvas_px, canvas_py)
-                                item.setTransform(QTransform(m11, m12, m21, m22, 0, 0))
-
-                                if layer_name == "背景図面":
-                                    item.setZValue(-100)
-
-                                self.scene.addItem(item)
-                                self.shapes.append({
-                                    "type": "image", "file_path": fpath,
-                                    "pos": (canvas_px, canvas_py),
-                                    "transform": [m11, m12, m21, m22, 0, 0],
-                                    "scale": math.hypot(m11, m12),
-                                    "rotation": math.degrees(math.atan2(-m12, m11)),
-                                    "opacity": 1.0,
-                                    "layer": layer_name, "item": item
-                                })
-
-            self.apply_layer_states()
+        self.start_history_record()
+        all_pts = []
+        for s in target_shapes:
+            if s["type"] == "line": all_pts.extend([s["p1"], s["p2"]])
+            elif s["type"] == "polyline": all_pts.extend(s["points"])
+            self.safe_remove_item(s.get("item"))
+            if s in self.shapes: self.shapes.remove(s)
+            
+        if all_pts:
+            self.scene.clearSelection()
+            pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
+            path = QPainterPath(); path.moveTo(QPointF(all_pts[0][0], all_pts[0][1]))
+            for p in all_pts[1:]: path.lineTo(QPointF(p[0], p[1]))
+            j_item = self.scene.addPath(path, pen)
+            self.shapes.append({"type": "polyline", "points": all_pts, "is_closed": False, "layer": self.active_layer, "color": self.current_color, "item": j_item})
             self.commit_history_record()
-            QMessageBox.information(self, "成功", f"DXFファイルを読み込みました:\n{os.path.basename(file_path)}")
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"DXFインポート失敗:\n{e}")
+            QMessageBox.information(self, "結合完了", f"{len(target_shapes)}本の線を結合しました。")
 
-    # --- 直線・水平線・垂直線・オフセット関連プロンプト ---
-    def prompt_line_length_settings(self):
-        val, ok = QInputDialog.getDouble(self, "水平・垂直線の長さ指定", "描画する線の長さ（mm）を入力してください\n(0 を指定すると画面端まで伸ばします):", self.preset_line_length, 0.0, 100000.0, 1)
-        if ok:
-            self.preset_line_length = val
-            msg = "今後の水平・垂直線は全画面長で作図されます。" if val <= 0 else f"今後の水平・垂直線の長さを {val} mm に設定しました。"
-            QMessageBox.information(self, "完了", msg)
-
-    def prompt_offset_settings(self):
-        val, ok = QInputDialog.getDouble(self, "平行線 (オフセット)", "オフセットのピッチ距離（mm）を入力してください:", self.offset_dist, 0.1, 100000.0, 1)
-        if ok and val > 0:
-            self.offset_dist = val
-            self.execute_exact_offset(val)
-
-    def prompt_xy_offset_settings(self):
-        dx_val, ok1 = QInputDialog.getDouble(self, "X軸方向ピッチ平行複写", "X軸方向（左右）のピッチ距離（mm）:", 50.0, -100000.0, 100000.0, 1)
-        if not ok1: return
-        dy_val, ok2 = QInputDialog.getDouble(self, "Y軸方向ピッチ平行複写", "Y軸方向（上下）のピッチ距離（mm）:", 0.0, -100000.0, 100000.0, 1)
-        if not ok2: return
-        self.execute_xy_pitch_offset(dx_val, dy_val)
-
-    def execute_exact_offset(self, dist):
-        """選択線分・ポリラインの長さを完全に保持した平行線（オフセット）を生成"""
-        selected = self.scene.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "通知", "オフセットする線を選択してください。")
-            return
-
-        self.start_history_record()
-        pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-
-        for item in selected:
-            shape = next((s for s in self.shapes if s.get("item") == item), None)
-            if not shape: continue
-            stype = shape.get("type")
-
-            if stype == "line":
-                p1, p2 = QPointF(*shape["p1"]), QPointF(*shape["p2"])
-                dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
-                length = math.hypot(dx, dy)
-                if length > 1e-4:
-                    nx, ny = -dy / length, dx / length
-                    new_p1 = (p1.x() + nx * dist, p1.y() + ny * dist)
-                    new_p2 = (p2.x() + nx * dist, p2.y() + ny * dist)
-                    o_item = self.scene.addLine(new_p1[0], new_p1[1], new_p2[0], new_p2[1], pen)
-                    self.shapes.append({"type": "line", "p1": new_p1, "p2": new_p2, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
-
-            elif stype == "polyline":
-                pts = shape["points"]
-                if len(pts) >= 2:
-                    ls = LineString(pts)
-                    off_ls = ls.parallel_offset(dist, 'left')
-                    if not off_ls.is_empty and hasattr(off_ls, 'coords'):
-                        c_pts = list(off_ls.coords)
-                        path = QPainterPath(); path.moveTo(QPointF(c_pts[0][0], c_pts[0][1]))
-                        for pt in c_pts[1:]: path.lineTo(QPointF(pt[0], pt[1]))
-                        o_item = self.scene.addPath(path, pen)
-                        self.shapes.append({"type": "polyline", "points": c_pts, "is_closed": False, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
-
-        self.commit_history_record()
-
-    def execute_xy_pitch_offset(self, dx_pitch, dy_pitch):
-        """X軸・Y軸のピッチ距離指定で完全平行配置"""
-        selected = self.scene.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "通知", "平行複写するオブジェクトを選択してください。")
-            return
-
-        self.start_history_record()
-        for item in selected:
-            for shape in list(self.shapes):
-                if shape.get("item") == item:
-                    s_copy = {k: v for k, v in shape.items() if k != "item"}
-                    s_copy = copy.deepcopy(s_copy)
-                    self._translate_shape(s_copy, dx_pitch, dy_pitch)
-                    new_item = self._recreate_shape_item(s_copy)
-                    if new_item:
-                        new_item.setSelected(True)
-                        s_copy["item"] = new_item
-                        self.shapes.append(s_copy)
-        self.commit_history_record()
-
-    # --- 画像・PDFの挿入と背景設定 ---
-    def insert_image_or_pdf(self, file_path, pos=None):
-        self.start_history_record()
-        pixmap = None
-        if file_path.lower().endswith('.pdf'):
-            try:
-                doc = pymupdf.open(file_path)
-                pix = doc[0].get_pixmap(dpi=150)
-                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
-            except Exception as e: QMessageBox.critical(self, "エラー", f"PDF挿入失敗:\n{e}"); return
-        else:
-            pixmap = QPixmap(file_path)
-            if pixmap.isNull(): return
-
-        pixmap_item = CustomPixmapItem(pixmap)
-        is_select = (self.mode == "SELECT")
-        pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_select)
-        pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_select)
-
-        if pos:
-            p_x, p_y = pos.x(), pos.y()
-        else:
-            scene_center = self.mapToScene(self.viewport().rect().center())
-            p_x, p_y = scene_center.x() - pixmap.width() / 2.0, scene_center.y() - pixmap.height() / 2.0
-        
-        pixmap_item.setPos(p_x, p_y)
-        self.scene.addItem(pixmap_item)
-
-        self.shapes.append({
-            "type": "image",
-            "file_path": file_path,
-            "pos": (p_x, p_y),
-            "scale": 1.0,
-            "rotation": 0.0,
-            "opacity": 1.0,
-            "layer": self.active_layer,
-            "item": pixmap_item
-        })
-        self.commit_history_record()
-
-    def set_background_file(self, file_path):
-        if not os.path.exists(file_path): return
-        pixmap = None
-        if file_path.lower().endswith('.pdf'):
-            try:
-                doc = pymupdf.open(file_path)
-                pix = doc[0].get_pixmap(dpi=150)
-                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
-            except Exception as e: QMessageBox.critical(self, "エラー", f"PDF読込失敗:\n{e}"); return
-        else:
-            pixmap = QPixmap(file_path)
-            if pixmap.isNull(): return
-
-        pixmap_item = CustomPixmapItem(pixmap)
-        pixmap_item.setPos(0, 0)
-        pixmap_item.setZValue(-100)
-        self.scene.addItem(pixmap_item)
-
-        bg_layer = "背景図面" if "背景図面" in self.layers else self.active_layer
-        self.shapes.append({
-            "type": "image",
-            "file_path": file_path,
-            "pos": (0, 0),
-            "scale": 1.0,
-            "rotation": 0.0,
-            "opacity": 1.0,
-            "layer": bg_layer,
-            "item": pixmap_item
-        })
-        self.scene.setSceneRect(-100000, -100000, 200000, 200000)
-
-    # --- 単体テキスト編集 ---
-    def edit_text_shape(self, shape):
-        if not shape or shape.get("type") != "text": return
-        current_txt = shape.get("text", "")
-        current_font_size = shape.get("font_size", 12)
-        current_color = shape.get("color", self.current_color)
-
-        dlg = TextEditDialog(self, text=current_txt, font_size=current_font_size, color=current_color)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_txt, new_size, new_color = dlg.get_result()
-            if new_txt.strip():
-                self.start_history_record()
-                item = shape.get("item")
-                disp_color = self.get_display_color(new_color)
-
-                shape["text"] = new_txt.strip()
-                shape["font_size"] = new_size
-                shape["color"] = new_color
-
-                if item and isinstance(item, QGraphicsTextItem):
-                    item.setPlainText(new_txt.strip())
-                    item.setFont(QFont("Meiryo", int(new_size)))
-                    item.setDefaultTextColor(disp_color)
-                self.commit_history_record()
-
-    # --- 自動寸法・要素測定ヘルパー ---
-    def calculate_shape_measurements(self, pos):
-        click_pt = Point(pos.x(), pos.y())
-        target_shape = None
-        min_dist = 20.0
-        for shape in self.shapes:
-            geom = self._shape_to_shapely(shape)
-            if geom and geom.distance(click_pt) < min_dist:
-                min_dist = geom.distance(click_pt)
-                target_shape = shape
-
-        if not target_shape: return ""
-        stype = target_shape.get("type")
-
-        if stype in ["line", "dimension", "arrow"]:
-            p1, p2 = target_shape["p1"], target_shape["p2"]
-            length = math.hypot(p2[0] - p1[0], p2[1] - p1[1]) * self.scale_factor
-            return f"L = {length:.1f} mm"
-        elif stype == "rect":
-            w = abs(target_shape["p2"][0] - target_shape["p1"][0]) * self.scale_factor
-            h = abs(target_shape["p2"][1] - target_shape["p1"][1]) * self.scale_factor
-            return f"A = {(w * h) / 1000000.0:.2f} m²\n(L = {2*(w+h):.1f} mm)"
-        elif stype == "circle":
-            r = target_shape["radius"] * self.scale_factor
-            return f"A = {(math.pi * r * r) / 1000000.0:.2f} m²\n(φ = {2*r:.1f} mm)"
-        elif stype == "polyline":
-            pts = target_shape["points"]
-            geom = LineString(pts + [pts[0]]) if target_shape.get("is_closed") else LineString(pts)
-            length_mm = geom.length * self.scale_factor
-            if target_shape.get("is_closed") and len(pts) >= 3:
-                poly = Polygon(pts)
-                return f"A = {(poly.area * (self.scale_factor ** 2)) / 1000000.0:.2f} m²\n(L = {length_mm:.1f} mm)"
-            return f"L = {length_mm:.1f} mm"
-        return ""
-
-    # --- AutoCADスタイル寸法線描画 ---
-    def create_autocad_dimension(self, p1, p2, offset=25.0):
-        dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
-        dist = math.hypot(dx, dy)
-        if dist < 1e-4: return
-
-        angle_rad = math.atan2(dy, dx)
-        angle_deg = math.degrees(angle_rad)
-
-        nx, ny = -dy / dist, dx / dist
-        p1_ext = QPointF(p1.x() + nx * offset, p1.y() + ny * offset)
-        p2_ext = QPointF(p2.x() + nx * offset, p2.y() + ny * offset)
-
-        disp_color = self.get_display_color(self.current_color)
-        pen_dim = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
-        pen_ext = QPen(disp_color, max(1, self.current_thickness - 1), Qt.PenStyle.SolidLine)
-
-        items = []
-        items.append(self.scene.addLine(p1.x() + nx * 2, p1.y() + ny * 2, p1_ext.x() + nx * 5, p1_ext.y() + ny * 5, pen_ext))
-        items.append(self.scene.addLine(p2.x() + nx * 2, p2.y() + ny * 2, p2_ext.x() + nx * 5, p2_ext.y() + ny * 5, pen_ext))
-        items.append(self.scene.addLine(p1_ext.x(), p1_ext.y(), p2_ext.x(), p2_ext.y(), pen_dim))
-
-        items.extend(self._draw_arrow_head_shape(p2_ext, angle_rad, self.arrow_head_type))
-        items.extend(self._draw_arrow_head_shape(p1_ext, angle_rad + math.pi, self.arrow_head_type))
-
-        val_str = f"{dist * self.scale_factor:.1f}"
-        t_item = self.scene.addText(val_str)
-        t_item.setDefaultTextColor(disp_color)
-        t_item.setFont(QFont("Meiryo", int(max(10, self.current_thickness * 3.5))))
-
-        text_angle = angle_deg
-        if text_angle > 90 or text_angle < -90:
-            text_angle += 180.0
-
-        t_rect = t_item.boundingRect()
-        t_item.setTransformOriginPoint(t_rect.width() / 2.0, t_rect.height() / 2.0)
-        t_item.setRotation(text_angle)
-
-        mid_x, mid_y = (p1_ext.x() + p2_ext.x()) / 2.0, (p1_ext.y() + p2_ext.y()) / 2.0
-        t_item.setPos(mid_x - t_rect.width() / 2.0 + nx * 8, mid_y - t_rect.height() / 2.0 + ny * 8)
-        items.append(t_item)
-
-        group = self.scene.createItemGroup(items)
-        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-
-        self.shapes.append({
-            "type": "dimension", "p1": (p1.x(), p1.y()), "p2": (p2.x(), p2.y()),
-            "val_str": val_str, "layer": self.active_layer, "color": self.current_color,
-            "thickness": self.current_thickness, "style": self.current_style, "item": group
-        })
-
-    def create_radius_dimension(self, p1, p2, is_diameter=False):
-        dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
-        dist = math.hypot(dx, dy)
-        if dist < 1e-4: return
-
-        disp_color = self.get_display_color(self.current_color)
-        pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
-        items = []
-        angle_rad = math.atan2(dy, dx)
-        angle_deg = math.degrees(angle_rad)
-
-        if is_diameter:
-            p0 = QPointF(p1.x() - dx, p1.y() - dy)
-            items.append(self.scene.addLine(p0.x(), p0.y(), p2.x(), p2.y(), pen))
-            items.extend(self._draw_arrow_head_shape(p2, angle_rad, self.arrow_head_type))
-            items.extend(self._draw_arrow_head_shape(p0, angle_rad + math.pi, self.arrow_head_type))
-            val_str = f"φ{dist * 2.0 * self.scale_factor:.1f}"
-        else:
-            items.append(self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen))
-            items.extend(self._draw_arrow_head_shape(p2, angle_rad, self.arrow_head_type))
-            val_str = f"R{dist * self.scale_factor:.1f}"
-
-        t_item = self.scene.addText(val_str)
-        t_item.setDefaultTextColor(disp_color)
-        t_item.setFont(QFont("Meiryo", int(max(10, self.current_thickness * 3.5))))
-
-        text_angle = angle_deg
-        if text_angle > 90 or text_angle < -90:
-            text_angle += 180.0
-
-        t_rect = t_item.boundingRect()
-        t_item.setTransformOriginPoint(t_rect.width() / 2.0, t_rect.height() / 2.0)
-        t_item.setRotation(text_angle)
-
-        mid_x, mid_y = (p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0
-        t_item.setPos(mid_x - t_rect.width() / 2.0, mid_y - t_rect.height() / 2.0 - 5.0)
-        items.append(t_item)
-
-        group = self.scene.createItemGroup(items)
-        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-
-        self.shapes.append({
-            "type": "dimension", "p1": (p1.x(), p1.y()), "p2": (p2.x(), p2.y()),
-            "val_str": val_str, "layer": self.active_layer, "color": self.current_color,
-            "thickness": self.current_thickness, "style": self.current_style, "item": group
-        })
-
-    # --- 表（テーブル）自動生成・移動・再編集 ---
-    def add_table_data(self, grid_data, cell_w, cell_h, pos, align="CENTER", font_size=None, color=None, target_shape=None):
-        rows = len(grid_data)
-        cols = max(len(r) for r in grid_data) if grid_data else 0
-        if rows == 0 or cols == 0: return
-
-        if isinstance(align, bool):
-            align = "CENTER" if align else "LEFT"
-        align = str(align).upper()
-
-        if font_size is None:
-            font_size = max(10, int(self.current_thickness * 3.5))
-        else:
-            font_size = int(font_size)
-
-        table_color = QColor(color) if color else self.current_color
-        font = QFont("Meiryo", font_size)
-
-        dummy_item = QGraphicsTextItem()
-        dummy_item.setFont(font)
-        for r in range(rows):
-            for c in range(len(grid_data[r])):
-                val = str(grid_data[r][c]).strip()
-                if val:
-                    dummy_item.setPlainText(val)
-                    rect = dummy_item.boundingRect()
-                    cell_w = max(cell_w, rect.width() + 10.0)
-                    cell_h = max(cell_h, rect.height() + 6.0)
-
-        self.start_history_record()
-        disp_color = self.get_display_color(table_color)
-        pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
-        sx, sy = pos.x(), pos.y()
-
-        table_items = []
-
-        for r in range(rows + 1):
-            line = self.scene.addLine(sx, sy + r * cell_h, sx + cols * cell_w, sy + r * cell_h, pen)
-            table_items.append(line)
-        for c in range(cols + 1):
-            line = self.scene.addLine(sx + c * cell_w, sy, sx + c * cell_w, sy + rows * cell_h, pen)
-            table_items.append(line)
-
-        for r in range(rows):
-            for c in range(len(grid_data[r])):
-                val = str(grid_data[r][c]).strip()
-                if val:
-                    t_item = self.scene.addText(val, font)
-                    t_item.setDefaultTextColor(disp_color)
-                    t_rect = t_item.boundingRect()
-
-                    cell_x = sx + c * cell_w
-                    cell_y = sy + r * cell_h
-                    ty = cell_y + (cell_h - t_rect.height()) / 2.0
-
-                    if align == "CENTER":
-                        tx = cell_x + (cell_w - t_rect.width()) / 2.0
-                    elif align == "RIGHT":
-                        tx = cell_x + cell_w - t_rect.width() - 5.0
-                    else:  # LEFT
-                        tx = cell_x + 5.0
-
-                    t_item.setPos(tx, ty)
-                    table_items.append(t_item)
-
-        if table_items:
-            group = self.scene.createItemGroup(table_items)
-            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-
-            if target_shape and target_shape in self.shapes:
-                if target_shape.get("item"):
-                    self.safe_remove_item(target_shape["item"])
-                target_shape["grid_data"] = grid_data
-                target_shape["cell_w"] = cell_w
-                target_shape["cell_h"] = cell_h
-                target_shape["align"] = align
-                target_shape["font_size"] = font_size
-                target_shape["color"] = table_color
-                target_shape["pos"] = (sx, sy)
-                target_shape["item"] = group
-            else:
-                self.shapes.append({
-                    "type": "table",
-                    "grid_data": grid_data,
-                    "cell_w": cell_w,
-                    "cell_h": cell_h,
-                    "align": align,
-                    "font_size": font_size,
-                    "pos": (sx, sy),
-                    "layer": self.active_layer,
-                    "color": table_color,
-                    "thickness": self.current_thickness,
-                    "style": self.current_style,
-                    "item": group
-                })
-
-        self.commit_history_record()
-
-    def edit_table_shape(self, shape):
-        if not shape or shape.get("type") != "table": return
-        
-        grp_item = shape.get("item")
-        if grp_item and isinstance(grp_item, QGraphicsItemGroup):
-            rect = grp_item.sceneTransform().mapRect(grp_item.boundingRect())
-            pos = QPointF(rect.x(), rect.y())
-        else:
-            pos_val = shape.get("pos", (0, 0))
-            pos = QPointF(pos_val[0], pos_val[1])
-
-        dlg = TableEditDialog(
-            self,
-            grid_data=shape.get("grid_data", [[""]]),
-            cell_w=shape.get("cell_w", 100),
-            cell_h=shape.get("cell_h", 30),
-            align=shape.get("align", "CENTER"),
-            font_size=shape.get("font_size", 12),
-            color=shape.get("color", self.current_color)
-        )
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_grid, new_w, new_h, new_align, new_fsize, new_color = dlg.get_result()
-            self.add_table_data(new_grid, new_w, new_h, pos, align=new_align, font_size=new_fsize, color=new_color, target_shape=shape)
-
-    def mouseDoubleClickEvent(self, event):
-        item = self.itemAt(event.pos())
-        if item:
-            for shape in self.shapes:
-                stype = shape.get("type")
-                if stype == "table":
-                    grp = shape.get("item")
-                    if grp == item or (isinstance(grp, QGraphicsItemGroup) and item in grp.childItems()):
-                        self.edit_table_shape(shape)
-                        return
-                elif stype == "text":
-                    if shape.get("item") == item:
-                        self.edit_text_shape(shape)
-                        return
-        super().mouseDoubleClickEvent(event)
-
-    # --- 矢印形状・方向の設定・変更処理 ---
-    def prompt_arrow_settings(self):
-        head_types = ["▲ 塗りつぶし (FILLED)", "＞ 開いた線 (OPEN)", "● 黒丸 (DOT)", "/ 建築用斜線 (SLASH)"]
-        directions = ["終点のみ (END)", "始点のみ (START)", "両端 (BOTH)"]
-
-        type_keys = ["FILLED", "OPEN", "DOT", "SLASH"]
-        dir_keys = ["END", "START", "BOTH"]
-
-        h_idx = type_keys.index(self.arrow_head_type) if self.arrow_head_type in type_keys else 0
-        d_idx = dir_keys.index(self.arrow_direction) if self.arrow_direction in dir_keys else 0
-
-        h_item, ok1 = QInputDialog.getItem(self, "矢印形状の設定", "矢印の頭部形状を選択してください:", head_types, h_idx, False)
-        if not ok1: return
-
-        d_item, ok2 = QInputDialog.getItem(self, "矢印向きの設定", "矢印の配置方向を選択してください:", directions, d_idx, False)
-        if not ok2: return
-
-        new_h = type_keys[head_types.index(h_item)]
-        new_d = dir_keys[directions.index(d_item)]
-
-        self.arrow_head_type = new_h
-        self.arrow_direction = new_d
-
-        selected = self.scene.selectedItems()
-        if selected:
-            self.change_selected_arrows_style(head_type=new_h, direction=new_d)
-            QMessageBox.information(self, "完了", "選択中の矢印/寸法線のスタイルを変更しました。")
-        else:
-            QMessageBox.information(self, "完了", f"今後の作図設定を更新しました:\n・形状: {h_item}\n・向き: {d_item}")
-
-    def _draw_arrow_head_shape(self, pos, angle, head_type=None):
-        if not head_type: head_type = self.arrow_head_type
-        disp_color = self.get_display_color(self.current_color)
-        size = max(10, self.current_thickness * 3.5)
-        created_items = []
-
-        if head_type == "FILLED":
-            p_a1 = QPointF(pos.x() - size * math.cos(angle - math.pi / 6), pos.y() - size * math.sin(angle - math.pi / 6))
-            p_a2 = QPointF(pos.x() - size * math.cos(angle + math.pi / 6), pos.y() - size * math.sin(angle + math.pi / 6))
-            item = self.scene.addPolygon(QPolygonF([pos, p_a1, p_a2]), QPen(disp_color, 1), QBrush(disp_color))
-            created_items.append(item)
-
-        elif head_type == "OPEN":
-            p_a1 = QPointF(pos.x() - size * math.cos(angle - math.pi / 6), pos.y() - size * math.sin(angle - math.pi / 6))
-            p_a2 = QPointF(pos.x() - size * math.cos(angle + math.pi / 6), pos.y() - size * math.sin(angle + math.pi / 6))
-            pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
-            item1 = self.scene.addLine(pos.x(), pos.y(), p_a1.x(), p_a1.y(), pen)
-            item2 = self.scene.addLine(pos.x(), pos.y(), p_a2.x(), p_a2.y(), pen)
-            created_items.extend([item1, item2])
-
-        elif head_type == "DOT":
-            r = size * 0.4
-            item = self.scene.addEllipse(pos.x() - r, pos.y() - r, 2 * r, 2 * r, QPen(disp_color, 1), QBrush(disp_color))
-            created_items.append(item)
-
-        elif head_type == "SLASH":
-            pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
-            s_angle = angle + math.pi / 4
-            p1 = QPointF(pos.x() - size * 0.6 * math.cos(s_angle), pos.y() - size * 0.6 * math.sin(s_angle))
-            p2 = QPointF(pos.x() + size * 0.6 * math.cos(s_angle), pos.y() + size * 0.6 * math.sin(s_angle))
-            item = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
-            created_items.append(item)
-
-        return created_items
-
-    def _update_arrow_shape_graphics(self, shape):
-        if "head_items" in shape:
-            for item in shape["head_items"]:
-                self.safe_remove_item(item)
-            shape["head_items"] = []
-
-        if shape.get("item") and isinstance(shape["item"], QGraphicsLineItem):
-            p1, p2 = shape["p1"], shape["p2"]
-            shape["item"].setLine(p1[0], p1[1], p2[0], p2[1])
-
-            angle_end = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
-            angle_start = math.atan2(p1[1] - p2[1], p1[0] - p2[0])
-
-            h_type = shape.get("arrow_head_type", self.arrow_head_type)
-            dir_val = shape.get("arrow_direction", self.arrow_direction)
-
-            head_items = []
-            if dir_val in ["END", "BOTH"]:
-                head_items.extend(self._draw_arrow_head_shape(QPointF(p2[0], p2[1]), angle_end, h_type))
-            if dir_val in ["START", "BOTH"]:
-                head_items.extend(self._draw_arrow_head_shape(QPointF(p1[0], p1[1]), angle_start, h_type))
-            shape["head_items"] = head_items
-
-    def reverse_selected_arrows(self):
+    def generate_centerlines(self):
         selected = self.scene.selectedItems()
         if not selected: return
         self.start_history_record()
-        for shape in self.shapes:
-            if shape.get("item") in selected and shape.get("type") == "arrow":
-                shape["p1"], shape["p2"] = shape["p2"], shape["p1"]
-                self._update_arrow_shape_graphics(shape)
-        self.commit_history_record()
-
-    def change_selected_arrows_style(self, head_type=None, direction=None):
-        selected = self.scene.selectedItems()
-        if not selected: return
-        self.start_history_record()
-        for shape in self.shapes:
-            if shape.get("item") in selected and shape.get("type") == "arrow":
-                if head_type: shape["arrow_head_type"] = head_type
-                if direction: shape["arrow_direction"] = direction
-                self._update_arrow_shape_graphics(shape)
-        self.commit_history_record()
-
-    # --- 右クリックコンテキストメニュー ---
-    def contextMenuEvent(self, event):
-        item = self.itemAt(event.pos())
-        menu = QMenu(self)
-
-        if item and item not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)):
-            if not item.isSelected():
-                self.scene.clearSelection()
-                item.setSelected(True)
-
-        selected = self.scene.selectedItems()
-        if selected:
-            table_shape = None
-            text_shape = None
-            for shape in self.shapes:
-                grp = shape.get("item")
-                if shape.get("type") == "table" and (grp in selected or any(isinstance(grp, QGraphicsItemGroup) and child in selected for child in grp.childItems())):
-                    table_shape = shape
-                    break
-                elif shape.get("type") == "text" and grp in selected:
-                    text_shape = shape
-                    break
-
-            if table_shape:
-                tbl_act = menu.addAction("📊 表を再編集...")
-                tbl_act.triggered.connect(lambda: self.edit_table_shape(table_shape))
-                menu.addSeparator()
-
-            if text_shape:
-                txt_act = menu.addAction("📝 文字を再編集...")
-                txt_act.triggered.connect(lambda: self.edit_text_shape(text_shape))
-                menu.addSeparator()
-
-            menu.addAction("📋 複製 (Duplicate)", self.duplicate_selected)
-            menu.addAction("✂ コピー (Ctrl+C)", self.copy_selected_to_clipboard)
-            menu.addAction("🗑 削除 (Delete)", self.delete_selected)
-            menu.addSeparator()
-
-            arrow_cfg_act = menu.addAction("🏹 矢印の設定 (形状・向き)...")
-            arrow_cfg_act.triggered.connect(self.prompt_arrow_settings)
-
-            has_arrow = any(s.get("item") in selected and s.get("type") == "arrow" for s in self.shapes)
-            if has_arrow:
-                arrow_menu = menu.addMenu("🏹 矢印のクイック操作")
-                arrow_menu.addAction("🔃 向きを反転", self.reverse_selected_arrows)
-                arrow_menu.addSeparator()
-
-                dir_end = arrow_menu.addAction("終点に矢印 (標準)")
-                dir_end.triggered.connect(lambda: self.change_selected_arrows_style(direction="END"))
-                dir_start = arrow_menu.addAction("始点に矢印")
-                dir_start.triggered.connect(lambda: self.change_selected_arrows_style(direction="START"))
-                dir_both = arrow_menu.addAction("両端に矢印")
-                dir_both.triggered.connect(lambda: self.change_selected_arrows_style(direction="BOTH"))
-
-                arrow_menu.addSeparator()
-                type_filled = arrow_menu.addAction("▲ 塗りつぶし矢印")
-                type_filled.triggered.connect(lambda: self.change_selected_arrows_style(head_type="FILLED"))
-                type_open = arrow_menu.addAction("＞ 開いた線矢印")
-                type_open.triggered.connect(lambda: self.change_selected_arrows_style(head_type="OPEN"))
-                type_dot = arrow_menu.addAction("● 黒丸 (ドット)")
-                type_dot.triggered.connect(lambda: self.change_selected_arrows_style(head_type="DOT"))
-                type_slash = arrow_menu.addAction("/ 建築用斜線 (スラッシュ)")
-                type_slash.triggered.connect(lambda: self.change_selected_arrows_style(head_type="SLASH"))
-
-            menu.addSeparator()
-
-            # オフセット・ピッチ並びメニュー
-            off_act = menu.addAction("↔️ 平行線 (オフセット距離指定)...")
-            off_act.triggered.connect(self.prompt_offset_settings)
-            xy_off_act = menu.addAction("↕️ X軸/Y軸ピッチ平行線...")
-            xy_off_act.triggered.connect(self.prompt_xy_offset_settings)
-
-            menu.addSeparator()
-
-            rot_act = menu.addAction("🔄 90度回転")
-            rot_act.triggered.connect(lambda: self.set_mode("ROTATE"))
-            rot_copy_act = menu.addAction("🔄 90度回転コピー")
-            rot_copy_act.triggered.connect(lambda: self.set_mode("ROTATE_COPY"))
-            mir_act = menu.addAction("🪞 左右反転")
-            mir_act.triggered.connect(lambda: self.set_mode("MIRROR"))
-            mir_copy_act = menu.addAction("🪞 左右反転コピー")
-            mir_copy_act.triggered.connect(lambda: self.set_mode("MIRROR_COPY"))
-            
-            menu.addSeparator()
-            hatch_act = menu.addAction("🎨 ハッチング適用 (HATCH)")
-            hatch_act.triggered.connect(self.apply_hatching)
-            cloud_act = menu.addAction("☁️ 雲マークに変換")
-            cloud_act.triggered.connect(self.convert_selected_to_cloud)
-            
-            menu.addSeparator()
-            front_act = menu.addAction("⬆ 最前面へ移動")
-            front_act.triggered.connect(self.bring_selected_to_front)
-            back_act = menu.addAction("⬇ 最背面へ移動")
-            back_act.triggered.connect(self.send_selected_to_back)
-            
-            menu.addSeparator()
-            join_act = menu.addAction("🔗 線の結合 (JOIN)")
-            join_act.triggered.connect(self.join_selected_lines)
-            center_act = menu.addAction("🎯 中心線生成")
-            center_act.triggered.connect(self.generate_centerlines)
-            
-            menu.addSeparator()
-            grp_act = menu.addAction("📦 グループ化")
-            grp_act.triggered.connect(self.group_selected_items)
-            ungrp_act = menu.addAction("💥 グループ解除")
-            ungrp_act.triggered.connect(self.ungroup_selected_items)
-            
-            layer_act = menu.addAction("🏷️ レイヤー変更...")
-            layer_act.triggered.connect(self.prompt_change_selected_layer)
-
-            has_image = any(isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem)) for i in selected)
-            if has_image:
-                opacity_act = menu.addAction("🌫️ 透明度を変更...")
-                opacity_act.triggered.connect(self.set_selected_image_opacity)
-
-        else:
-            len_cfg_act = menu.addAction("📏 水平・垂直線の長さ指定...")
-            len_cfg_act.triggered.connect(self.prompt_line_length_settings)
-            arrow_cfg_act = menu.addAction("🏹 矢印の設定 (形状・向き)...")
-            arrow_cfg_act.triggered.connect(self.prompt_arrow_settings)
-            menu.addSeparator()
-
-            if self.copied_shapes_buffer:
-                paste_act = menu.addAction("📋 ペースト (Ctrl+V)")
-                paste_act.triggered.connect(self.paste_from_clipboard)
-                menu.addSeparator()
-            
-            select_all_act = menu.addAction("☑ すべて選択 (Ctrl+A)")
-            select_all_act.triggered.connect(lambda: [i.setSelected(True) for i in self.scene.items() if i not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None))])
-            
-            new_act = menu.addAction("📄 DXFファイルを読み込む...")
-            new_act.triggered.connect(lambda: self.import_dxf_file())
-
-            new_proj_act = menu.addAction("📄 キャンバスクリア (新規)")
-            new_proj_act.triggered.connect(self.new_project)
-
-        menu.exec(event.globalPos())
-
-    # --- 境界線抽出・ハッチング機能 ---
-    def _extract_boundaries_from_items(self, items):
-        lines = []
-        for item in items:
-            shape = next((s for s in self.shapes if s.get("item") == item), None)
-            stype = shape.get("type") if shape else None
-
-            if isinstance(item, QGraphicsLineItem) or stype in ["line", "arrow", "leader"]:
-                if shape and "p1" in shape and "p2" in shape:
-                    lines.append(LineString([shape["p1"], shape["p2"]]))
-                else:
-                    line = item.line()
-                    p1 = item.mapToScene(line.p1())
-                    p2 = item.mapToScene(line.p2())
-                    lines.append(LineString([(p1.x(), p1.y()), (p2.x(), p2.y())]))
-
-            elif isinstance(item, QGraphicsRectItem) or stype == "rect":
-                rect = item.sceneTransform().mapRect(item.boundingRect())
-                x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
-                lines.append(LineString([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]))
-
-            elif isinstance(item, QGraphicsEllipseItem) or stype in ["circle", "arc"]:
-                if shape and shape.get("type") == "arc":
-                    cx, cy = shape["center"]
-                    r = shape["radius"]
-                    st, sp = shape["start_angle"], shape["span_angle"]
-                    num_pts = max(24, int(abs(sp) / 3))
-                    pts = []
-                    for i in range(num_pts + 1):
-                        ang = math.radians(-st - (sp * i / num_pts))
-                        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
-                    if len(pts) >= 2:
-                        lines.append(LineString(pts))
-                else:
-                    rect = item.sceneTransform().mapRect(item.boundingRect())
-                    cx, cy, rx, ry = rect.center().x(), rect.center().y(), rect.width() / 2.0, rect.height() / 2.0
-                    pts = [(cx + rx * math.cos(2 * math.pi * i / 64), cy + ry * math.sin(2 * math.pi * i / 64)) for i in range(65)]
-                    lines.append(LineString(pts))
-
-            elif isinstance(item, QGraphicsPolygonItem) or (shape and shape.get("type") in ["polyline", "spline"]):
-                if shape and "points" in shape:
-                    pts = shape["points"]
-                    if shape.get("is_closed") and len(pts) >= 3:
-                        pts = pts + [pts[0]]
-                    if len(pts) >= 2:
-                        lines.append(LineString(pts))
-                elif isinstance(item, QGraphicsPolygonItem):
-                    poly_f = item.polygon()
-                    pts = [(pt.x(), pt.y()) for pt in poly_f]
-                    if len(pts) >= 2:
-                        lines.append(LineString(pts))
-
-            elif isinstance(item, QGraphicsItemGroup):
-                lines.extend(self._extract_boundaries_from_items(item.childItems()))
-
-        return lines
-
-    def _item_to_shapely_polygon(self, item):
-        rect = item.sceneTransform().mapRect(item.boundingRect())
-        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
-        if w <= 0 or h <= 0: return None
-
-        if isinstance(item, QGraphicsEllipseItem):
-            cx, cy, rx, ry = rect.center().x(), rect.center().y(), w / 2.0, h / 2.0
-            pts = [(cx + rx * math.cos(2 * math.pi * i / 64), cy + ry * math.sin(2 * math.pi * i / 64)) for i in range(64)]
-            return Polygon(pts)
-        elif isinstance(item, QGraphicsPolygonItem):
-            poly_f = item.polygon()
-            pts = [(pt.x(), pt.y()) for pt in poly_f]
-            if len(pts) >= 3: return Polygon(pts)
-        elif isinstance(item, QGraphicsRectItem):
-            return Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
-        elif isinstance(item, QGraphicsPathItem):
-            path = item.path()
-            pts = []
-            for i in range(path.elementCount()):
-                elem = path.elementAt(i)
-                pts.append((elem.x, elem.y))
-            if len(pts) >= 3: return Polygon(pts)
-        else:
-            return Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
-        return None
-
-    def apply_hatching(self):
-        selected = self.scene.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "通知", "ハッチングを行うオブジェクトを選択してください。")
-            return
-
-        boundary_lines = self._extract_boundaries_from_items(selected)
-        polygonized_polygons = []
-        if boundary_lines:
-            try:
-                merged_lines = unary_union(boundary_lines)
-                found_polys = list(polygonize(merged_lines))
-                for p in found_polys:
-                    if p.is_valid and not p.is_empty and p.area > 1e-3:
-                        polygonized_polygons.append(p)
-            except Exception:
-                pass
-
-        single_polygons = []
+        pen = QPen(self.get_display_color(QColor(255, 100, 0)), 1, Qt.PenStyle.DashDotLine)
+        count = 0
         for item in selected:
-            poly = self._item_to_shapely_polygon(item)
-            if poly and poly.is_valid and not poly.is_empty:
-                single_polygons.append(poly)
-
-        polygons = polygonized_polygons if polygonized_polygons else single_polygons
-
-        if not polygons:
-            QMessageBox.warning(self, "エラー", "交点や端点で囲まれた閉領域が見つかりませんでした。")
-            return
-
-        target_geom = None
-        if len(polygons) == 1:
-            target_geom = polygons[0]
-        else:
-            options = [
-                "1. 交点・端点で囲まれたすべての閉領域にハッチング",
-                "2. 選択オブジェクト個別にハッチング",
-                "3. 外枠から内側を除外（中抜きハッチング）",
-                "4. オブジェクトの重なり部分のみ (AND)",
-                "5. オブジェクトの重なっていない部分のみ (XOR/差分)"
-            ]
-            item_str, ok = QInputDialog.getItem(self, "ハッチング範囲の指定", "ハッチングの作図範囲を選択してください:", options, 0, False)
-            if not ok: return
-
-            if item_str.startswith("1"):
-                target_geom = MultiPolygon(polygons)
-            elif item_str.startswith("2"):
-                target_geom = MultiPolygon(single_polygons if single_polygons else polygons)
-            elif item_str.startswith("3"):
-                p_list = single_polygons if single_polygons else polygons
-                p_list.sort(key=lambda p: p.area, reverse=True)
-                outer = p_list[0]
-                for inner in p_list[1:]:
-                    outer = outer.difference(inner)
-                target_geom = outer
-            elif item_str.startswith("4"):
-                p_list = single_polygons if single_polygons else polygons
-                target_geom = p_list[0]
-                for p in p_list[1:]:
-                    target_geom = target_geom.intersection(p)
-            elif item_str.startswith("5"):
-                p_list = single_polygons if single_polygons else polygons
-                target_geom = p_list[0]
-                for p in p_list[1:]:
-                    target_geom = target_geom.symmetric_difference(p)
-
-        if target_geom is None or target_geom.is_empty:
-            QMessageBox.information(self, "通知", "該当するハッチング領域がありません。")
-            return
-
-        self.start_history_record()
-        pen = QPen(self.get_display_color(self.hatch_color), self.hatch_thickness, self.hatch_style)
-
-        bounds = target_geom.bounds
-        minx, miny, maxx, maxy = bounds
-        cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
-        w, h = maxx - minx, maxy - miny
-        diag = math.hypot(w, h) * 2.0
-
-        rad = math.radians(self.hatch_angle)
-        spacing = max(2.0, self.hatch_spacing)
-        num_lines = int(diag / spacing) + 1
-
-        for i in range(-num_lines, num_lines + 1):
-            offset = i * spacing
-            rx1 = cx + (-diag) * math.cos(rad) - offset * math.sin(rad)
-            ry1 = cy + (-diag) * math.sin(rad) + offset * math.cos(rad)
-            rx2 = cx + diag * math.cos(rad) - offset * math.sin(rad)
-            ry2 = cy + diag * math.sin(rad) + offset * math.cos(rad)
-
-            line = LineString([(rx1, ry1), (rx2, ry2)])
-            try:
-                inter = target_geom.intersection(line)
-                if not inter.is_empty:
-                    geoms = [inter] if isinstance(inter, LineString) else (list(inter.geoms) if hasattr(inter, 'geoms') else [])
-                    for g in geoms:
-                        if isinstance(g, LineString):
-                            coords = list(g.coords)
-                            h_item = self.scene.addLine(coords[0][0], coords[0][1], coords[-1][0], coords[-1][1], pen)
-                            self.shapes.append({"type": "line", "p1": coords[0], "p2": coords[-1], "layer": self.active_layer, "color": self.hatch_color, "item": h_item})
-            except Exception:
-                pass
-
+            rect = item.sceneTransform().mapRect(item.boundingRect())
+            cx, cy = rect.center().x(), rect.center().y()
+            ext = max(rect.width(), rect.height()) / 2 * 1.2
+            l1 = self.scene.addLine(cx - ext, cy, cx + ext, cy, pen)
+            l2 = self.scene.addLine(cx, cy - ext, cx, cy + ext, pen)
+            self.shapes.append({"type": "line", "p1": (cx - ext, cy), "p2": (cx + ext, cy), "layer": "中心線", "color": QColor(255, 100, 0), "item": l1})
+            self.shapes.append({"type": "line", "p1": (cx, cy - ext), "p2": (cx, cy + ext), "layer": "中心線", "color": QColor(255, 100, 0), "item": l2})
+            count += 1
         self.commit_history_record()
+        if count: QMessageBox.information(self, "完了", f"{count}個のオブジェクトに中心線を生成しました。")
 
     # --- 雲マーク変換機能 ---
     def convert_selected_to_cloud(self):
@@ -1742,299 +491,7 @@ class CADCanvas(QGraphicsView):
             self.safe_remove_item(item)
         self.commit_history_record()
 
-    # --- グループ化機能 ---
-    def group_selected_items(self):
-        selected = self.scene.selectedItems()
-        if len(selected) < 2:
-            QMessageBox.warning(self, "通知", "グループ化するには2つ以上の要素を選択してください。")
-            return False
-        self.start_history_record()
-        group_item = self.scene.createItemGroup(selected)
-        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.shapes.append({"type": "group", "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item_count": len(selected), "item": group_item})
-        self.commit_history_record()
-        return True
-
-    def ungroup_selected_items(self):
-        selected = self.scene.selectedItems()
-        if not selected: return
-        self.start_history_record()
-        for item in selected:
-            if isinstance(item, QGraphicsItemGroup):
-                items_in_group = item.childItems()
-                self.scene.destroyItemGroup(item)
-                for child in items_in_group:
-                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.commit_history_record()
-
-    # --- ブロック機能 ---
-    def create_block_from_selected(self, block_name, category="カスタム", base_point=None):
-        selected_items = self.scene.selectedItems()
-        if not selected_items: return False
-        target_shapes = list(self.shapes)
-        if not base_point:
-            rect = self.scene.createItemGroup(selected_items).boundingRect()
-            base_point = QPointF(rect.center().x(), rect.center().y())
-        bx, by = base_point.x(), base_point.y()
-        rel_shapes = []
-        for s in target_shapes:
-            s_copy = dict(s)
-            stype = s_copy.get("type")
-            if stype in ["line", "dimension", "arrow", "leader", "rect"]:
-                s_copy["p1"] = (s_copy["p1"][0] - bx, s_copy["p1"][1] - by)
-                s_copy["p2"] = (s_copy["p2"][0] - bx, s_copy["p2"][1] - by)
-            elif stype == "circle": s_copy["center"] = (s_copy["center"][0] - bx, s_copy["center"][1] - by)
-            elif stype == "polyline": s_copy["points"] = [(px - bx, py - by) for px, py in s_copy["points"]]
-            elif stype in ["point", "text"]: s_copy["pos"] = (s_copy["pos"][0] - bx, s_copy["pos"][1] - by)
-            rel_shapes.append(s_copy)
-
-        self.blocks[block_name] = {"category": category, "base_pt": (bx, by), "shapes": rel_shapes}
-        self.start_history_record()
-        for item in selected_items: self.safe_remove_item(item)
-        self.insert_block_ref(block_name, base_point)
-        self.commit_history_record()
-        return True
-
-    def insert_block_ref(self, block_name, pos):
-        if block_name not in self.blocks: return
-        blk_def = self.blocks[block_name]
-        px, py = pos.x(), pos.y()
-        self.start_history_record()
-        group_items = []
-        for s in blk_def["shapes"]:
-            stype = s.get("type")
-            color = self.get_display_color(s.get("color", self.current_color))
-            pen = QPen(color, s.get("thickness", self.current_thickness), s.get("style", self.current_style))
-            if stype == "line": item = self.scene.addLine(px + s["p1"][0], py + s["p1"][1], px + s["p2"][0], py + s["p2"][1], pen)
-            elif stype == "rect": item = self.scene.addRect(px + min(s["p1"][0], s["p2"][0]), py + min(s["p1"][1], s["p2"][1]), abs(s["p2"][0] - s["p1"][0]), abs(s["p2"][1] - s["p1"][1]), pen)
-            elif stype == "circle": item = self.scene.addEllipse(px + s["center"][0] - s["radius"], py + s["center"][1] - s["radius"], 2 * s["radius"], 2 * s["radius"], pen)
-            else: continue
-            group_items.append(item)
-
-        if group_items:
-            group = self.scene.createItemGroup(group_items)
-            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-            self.shapes.append({"type": "block_ref", "block_name": block_name, "pos": (px, py), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": group})
-        self.commit_history_record()
-
-    def explode_selected_block(self):
-        selected = self.scene.selectedItems()
-        if not selected: return
-        self.start_history_record()
-        for item in selected:
-            if isinstance(item, QGraphicsItemGroup):
-                items_in_group = item.childItems()
-                self.scene.destroyItemGroup(item)
-                for child in items_in_group:
-                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.commit_history_record()
-
-    def _add_cloned_shape_record(self, orig_item, cloned_item):
-        for shape in list(self.shapes):
-            if shape.get("item") == orig_item:
-                s_copy = {k: v for k, v in shape.items() if k != "item"}
-                s_copy = copy.deepcopy(s_copy)
-                s_copy["item"] = cloned_item
-                self.shapes.append(s_copy)
-                break
-
-    # --- 移動・複写実行処理 ---
-    def execute_move_selected(self, base_pt, target_pt):
-        selected_items = self.scene.selectedItems()
-        if not selected_items: return
-        dx, dy = target_pt.x() - base_pt.x(), target_pt.y() - base_pt.y()
-        self.start_history_record()
-        for item in selected_items: item.moveBy(dx, dy)
-        for shape in self.shapes:
-            if shape.get("item") and shape["item"].isSelected():
-                self._translate_shape(shape, dx, dy)
-        self.commit_history_record()
-
-    def execute_copy_selected(self, base_pt, target_pt):
-        selected_items = self.scene.selectedItems()
-        if not selected_items: return
-        dx, dy = target_pt.x() - base_pt.x(), target_pt.y() - base_pt.y()
-        self.start_history_record()
-        self.scene.clearSelection()
-        for shape in list(self.shapes):
-            item = shape.get("item")
-            if item and item in selected_items:
-                s_copy = {k: v for k, v in shape.items() if k != "item"}
-                s_copy = copy.deepcopy(s_copy)
-                self._translate_shape(s_copy, dx, dy)
-                new_item = self._recreate_shape_item(s_copy)
-                if new_item:
-                    new_item.setSelected(True)
-                    s_copy["item"] = new_item
-                    self.shapes.append(s_copy)
-        self.commit_history_record()
-
-    # --- 変形・特殊編集コマンド ---
-    def execute_edit_command(self):
-        selected = self.scene.selectedItems()
-        if not selected: return
-        self.start_history_record()
-        pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-
-        for item in selected:
-            rect = item.sceneTransform().mapRect(item.boundingRect())
-            if self.mode == "ROTATE":
-                item.setTransformOriginPoint(item.boundingRect().center())
-                item.setRotation(item.rotation() + self.rotate_angle)
-
-            elif self.mode == "ROTATE_COPY":
-                cloned = self._clone_item(item)
-                if cloned:
-                    cloned.setTransformOriginPoint(cloned.boundingRect().center())
-                    cloned.setRotation(cloned.rotation() + self.rotate_angle)
-                    self._add_cloned_shape_record(item, cloned)
-
-            elif self.mode == "SCALE":
-                item.setScale(item.scale() * self.scale_factor_val)
-
-            elif self.mode == "SCALE_COPY":
-                cloned = self._clone_item(item)
-                if cloned:
-                    cloned.setScale(cloned.scale() * self.scale_factor_val)
-                    self._add_cloned_shape_record(item, cloned)
-
-            elif self.mode == "MIRROR":
-                item.setTransformOriginPoint(item.boundingRect().center())
-                item.setTransform(item.transform().scale(-1, 1))
-
-            elif self.mode == "MIRROR_COPY":
-                cloned = self._clone_item(item)
-                if cloned:
-                    cloned.setTransformOriginPoint(cloned.boundingRect().center())
-                    cloned.setTransform(cloned.transform().scale(-1, 1))
-                    self._add_cloned_shape_record(item, cloned)
-
-            elif self.mode == "OFFSET":
-                line = LineString([(rect.left(), rect.top()), (rect.right(), rect.bottom())])
-                offset_line = line.parallel_offset(self.offset_dist, 'left')
-                if not offset_line.is_empty:
-                    c = list(offset_line.coords)
-                    o_item = self.scene.addLine(c[0][0], c[0][1], c[1][0], c[1][1], pen)
-                    self.shapes.append({"type": "line", "p1": c[0], "p2": c[-1], "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
-
-            elif self.mode == "ARRAY":
-                for r in range(self.array_rows):
-                    for c in range(self.array_cols):
-                        if r == 0 and c == 0: continue
-                        dx, dy = c * self.array_col_gap, r * self.array_row_gap
-                        if isinstance(item, QGraphicsEllipseItem):
-                            new_item = self.scene.addEllipse(rect.x() + dx, rect.y() + dy, rect.width(), rect.height(), pen)
-                            self.shapes.append({"type": "circle", "center": (rect.center().x()+dx, rect.center().y()+dy), "radius": rect.width()/2, "layer": self.active_layer, "color": self.current_color, "item": new_item})
-                        else:
-                            new_item = self.scene.addRect(rect.x() + dx, rect.y() + dy, rect.width(), rect.height(), pen)
-                            self.shapes.append({"type": "rect", "p1": (rect.x()+dx, rect.y()+dy), "p2": (rect.x()+dx+rect.width(), rect.y()+dx+rect.height()), "layer": self.active_layer, "color": self.current_color, "item": new_item})
-        self.commit_history_record()
-
-    # --- 数値指定・一括作図機能 ---
-    def process_coordinate_input(self, x, y, is_relative=False):
-        if is_relative:
-            base_x, base_y = (self.start_point.x(), self.start_point.y()) if self.start_point else (self.shapes[-1]["pos"] if self.shapes and "pos" in self.shapes[-1] else (0.0, 0.0))
-            target_pt = QPointF(base_x + x, base_y + y)
-        else: target_pt = QPointF(x, y)
-        cx, cy, pen = target_pt.x(), target_pt.y(), QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-
-        self.start_history_record()
-        if self.mode == "POINT":
-            r = max(2.0, self.current_thickness)
-            item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen, QBrush(self.get_display_color(self.current_color)))
-            self.shapes.append({"type": "point", "pos": (cx, cy), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-        elif self.mode in ["LINE", "RECT", "CIRCLE"]:
-            if self.start_point is None: self.start_point = target_pt
-            else:
-                x1, y1 = self.start_point.x(), self.start_point.y()
-                if self.mode == "LINE":
-                    item = self.scene.addLine(x1, y1, cx, cy, pen)
-                    self.shapes.append({"type": "line", "p1": (x1, y1), "p2": (cx, cy), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-                self.start_point = None
-        self.commit_history_record()
-
-    def generate_pitch_points(self, count, dx, dy, start_pos=None):
-        selected_items = self.scene.selectedItems()
-        self.start_history_record()
-
-        if selected_items:
-            for i in range(1, count + 1):
-                offset_x, offset_y = dx * i, dy * i
-                for shape in list(self.shapes):
-                    item = shape.get("item")
-                    if item and item in selected_items:
-                        s_copy = {k: v for k, v in shape.items() if k != "item"}
-                        s_copy = copy.deepcopy(s_copy)
-                        self._translate_shape(s_copy, offset_x, offset_y)
-                        new_item = self._recreate_shape_item(s_copy)
-                        if new_item:
-                            s_copy["item"] = new_item
-                            self.shapes.append(s_copy)
-        else:
-            if not start_pos:
-                start_pos = self.mapToScene(self.viewport().rect().center())
-            disp_color = self.get_display_color(self.current_color)
-            pen = QPen(disp_color, self.current_thickness, self.current_style)
-            r = max(2.0, self.current_thickness)
-            for i in range(1, count + 1):
-                cx, cy = start_pos.x() + dx * i, start_pos.y() + dy * i
-                item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen, QBrush(disp_color))
-                self.shapes.append({
-                    "type": "point", "pos": (cx, cy), "layer": self.active_layer,
-                    "color": self.current_color, "thickness": self.current_thickness,
-                    "style": self.current_style, "item": item
-                })
-        self.commit_history_record()
-
-    def generate_concentric_shapes(self, shape_type, base_size, step_val, is_multiplier, count, sides=4, center=None):
-        cx, cy = (center.x(), center.y()) if center else (self.mapToScene(self.viewport().rect().center()).x(), self.mapToScene(self.viewport().rect().center()).y())
-        self.start_history_record()
-        pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-        current_r = base_size
-        for i in range(count):
-            if shape_type == "CIRCLE":
-                item = self.scene.addEllipse(cx - current_r, cy - current_r, 2 * current_r, 2 * current_r, pen)
-                self.shapes.append({"type": "circle", "center": (cx, cy), "radius": current_r, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-            elif shape_type == "RECT":
-                item = self.scene.addRect(cx - current_r, cy - current_r, 2 * current_r, 2 * current_r, pen)
-                self.shapes.append({"type": "rect", "p1": (cx - current_r, cy - current_r), "p2": (cx + current_r, cy + current_r), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-            elif shape_type == "POLYGON":
-                pts = self._calc_regular_polygon_points_by_angle(cx, cy, current_r, sides, 0.0)
-                item = self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in pts]), pen, QBrush(Qt.BrushStyle.NoBrush))
-                self.shapes.append({"type": "polyline", "points": pts, "is_closed": True, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-            current_r = current_r * step_val if is_multiplier else current_r + step_val
-        self.commit_history_record()
-
-    def _calc_regular_polygon_points_by_angle(self, cx, cy, radius, sides, start_angle_deg):
-        base_angle = math.radians(start_angle_deg)
-        return [(cx + radius * math.cos(base_angle + 2 * math.pi * i / sides), cy + radius * math.sin(base_angle + 2 * math.pi * i / sides)) for i in range(sides)]
-
-    # --- キーボード・ショートカット操作 ---
-    def keyPressEvent(self, event):
-        modifiers = event.modifiers()
-        key = event.key()
-
-        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            self.delete_selected()
-        elif key == Qt.Key.Key_Escape:
-            self.set_mode("SELECT")
-        elif modifiers & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_A:
-            for item in self.scene.items():
-                if item not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)):
-                    item.setSelected(True)
-        elif modifiers & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_C:
-            self.copy_selected_to_clipboard()
-        elif modifiers & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_V:
-            self.paste_from_clipboard()
-        elif modifiers & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_D:
-            self.duplicate_selected()
-        else:
-            super().keyPressEvent(event)
-
+    # --- クリップボード・複製機能 ---
     def copy_selected_to_clipboard(self):
         selected_items = self.scene.selectedItems()
         if not selected_items: return
@@ -2042,8 +499,7 @@ class CADCanvas(QGraphicsView):
         for shape in self.shapes:
             item = shape.get("item")
             if item and item.isSelected():
-                s_copy = {k: v for k, v in shape.items() if k != "item"}
-                s_copy = copy.deepcopy(s_copy)
+                s_copy = copy.deepcopy({k: v for k, v in shape.items() if k != "item"})
                 self.copied_shapes_buffer.append(s_copy)
 
     def paste_from_clipboard(self):
@@ -2086,8 +542,7 @@ class CADCanvas(QGraphicsView):
         for shape in list(self.shapes):
             item = shape.get("item")
             if item and item in selected_items:
-                s_copy = {k: v for k, v in shape.items() if k != "item"}
-                s_copy = copy.deepcopy(s_copy)
+                s_copy = copy.deepcopy({k: v for k, v in shape.items() if k != "item"})
                 self._translate_shape(s_copy, 20.0, 20.0)
                 new_item = self._recreate_shape_item(s_copy)
                 if new_item:
@@ -2151,48 +606,1073 @@ class CADCanvas(QGraphicsView):
                     item = CustomPixmapItem(pixmap)
                     pos_val = shape.get("pos", (0, 0))
                     item.setPos(pos_val[0], pos_val[1])
-                    item.setScale(shape.get("scale", 1.0))
-                    item.setRotation(shape.get("rotation", 0.0))
+                    if "transform" in shape:
+                        m = shape["transform"]; item.setTransform(QTransform(m[0], m[1], m[2], m[3], m[4], m[5]))
+                    else:
+                        item.setScale(shape.get("scale", 1.0)); item.setRotation(shape.get("rotation", 0.0))
                     item.setOpacity(shape.get("opacity", 1.0))
-
-        elif stype == "line":
-            item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen)
-        elif stype == "arrow":
-            item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen)
-            self._update_arrow_shape_graphics(shape)
-        elif stype == "rect":
-            x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]
-            item = self.scene.addRect(min(x1, x2), min(y1, y2), abs(x1 - x2), abs(y1 - y2), pen)
-        elif stype == "circle":
-            cx, cy, r = shape["center"][0], shape["center"][1], shape["radius"]
-            item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
+                    if shape.get("layer") == "背景図面": item.setZValue(-100)
+                    self.scene.addItem(item); shape["item"] = item
+        elif stype == "line": item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen)
+        elif stype == "arrow": item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen); self._update_arrow_shape_graphics(shape)
+        elif stype == "rect": item = self.scene.addRect(min(shape["p1"][0], shape["p2"][0]), min(shape["p1"][1], shape["p2"][1]), abs(shape["p1"][0] - shape["p2"][0]), abs(shape["p1"][1] - shape["p2"][1]), pen)
+        elif stype == "circle": item = self.scene.addEllipse(shape["center"][0] - shape["radius"], shape["center"][1] - shape["radius"], 2 * shape["radius"], 2 * shape["radius"], pen)
         elif stype == "arc":
-            cx, cy, r = shape["center"][0], shape["center"][1], shape["radius"]
-            st, sp = shape["start_angle"], shape["span_angle"]
-            path = QPainterPath()
-            path.arcMoveTo(cx - r, cy - r, 2 * r, 2 * r, st)
-            path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, sp)
+            path = QPainterPath(); path.arcMoveTo(shape["center"][0] - shape["radius"], shape["center"][1] - shape["radius"], 2 * shape["radius"], 2 * shape["radius"], shape["start_angle"])
+            path.arcTo(shape["center"][0] - shape["radius"], shape["center"][1] - shape["radius"], 2 * shape["radius"], 2 * shape["radius"], shape["start_angle"], shape["span_angle"])
             item = self.scene.addPath(path, pen)
         elif stype in ["polyline", "spline"]:
             pts = [QPointF(pt[0], pt[1]) for pt in shape["points"]]
-            path = QPainterPath(); path.moveTo(pts[0])
-            for pt in pts[1:]: path.lineTo(pt)
-            if shape.get("is_closed"): path.closeSubpath()
-            item = self.scene.addPath(path, pen)
+            if shape.get("is_closed"): item = self.scene.addPolygon(pts, pen)
+            else:
+                path = QPainterPath(); path.moveTo(pts[0]); [path.lineTo(pt) for pt in pts[1:]]
+                item = self.scene.addPath(path, pen)
         elif stype == "text":
-            item = self.scene.addText(shape["text"])
-            item.setDefaultTextColor(color); item.setFont(QFont("Meiryo", int(shape.get("font_size", 12))))
-            item.setPos(shape["pos"][0], shape["pos"][1])
+            item = self.scene.addText(shape["text"]); item.setDefaultTextColor(color); item.setFont(QFont("Meiryo", int(shape.get("font_size", 12)))); item.setPos(*shape["pos"])
+        elif stype == "table":
+            self.add_table_data(shape.get("grid_data", [[""]]), shape.get("cell_w", 100), shape.get("cell_h", 30), QPointF(*shape.get("pos", (0, 0))), align=shape.get("align", "CENTER"), font_size=shape.get("font_size", 12), color=shape.get("color", self.current_color), target_shape=shape)
+            return shape.get("item")
 
         if item:
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         return item
 
-    # --- モード切替・描画リセット制御 ---
+    # --- 画像/PDFファイルの挿入 & 背景設定 (main.py連動) ---
+    def insert_image_or_pdf(self, file_path, pos=None):
+        self.start_history_record()
+        pixmap = None
+        if file_path.lower().endswith('.pdf'):
+            try:
+                doc = pymupdf.open(file_path)
+                pix = doc[0].get_pixmap(dpi=150)
+                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+            except Exception as e: 
+                QMessageBox.critical(self, "エラー", f"PDF挿入失敗:\n{e}")
+                return
+        else:
+            pixmap = QPixmap(file_path)
+            if pixmap.isNull(): return
+
+        pixmap_item = CustomPixmapItem(pixmap)
+        is_select = (self.mode == "SELECT")
+        pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_select)
+        pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_select)
+
+        if pos:
+            p_x, p_y = pos.x(), pos.y()
+        else:
+            scene_center = self.mapToScene(self.viewport().rect().center())
+            p_x, p_y = scene_center.x() - pixmap.width() / 2.0, scene_center.y() - pixmap.height() / 2.0
+        
+        pixmap_item.setPos(p_x, p_y)
+        self.scene.addItem(pixmap_item)
+
+        self.shapes.append({
+            "type": "image",
+            "file_path": file_path,
+            "pos": (p_x, p_y),
+            "scale": 1.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "layer": self.active_layer,
+            "item": pixmap_item
+        })
+        self.commit_history_record()
+
+    def set_background_file(self, file_path):
+        if not os.path.exists(file_path): return
+        pixmap = None
+        if file_path.lower().endswith('.pdf'):
+            try:
+                doc = pymupdf.open(file_path)
+                pix = doc[0].get_pixmap(dpi=150)
+                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+            except Exception as e: 
+                QMessageBox.critical(self, "エラー", f"PDF読込失敗:\n{e}")
+                return
+        else:
+            pixmap = QPixmap(file_path)
+            if pixmap.isNull(): return
+
+        pixmap_item = CustomPixmapItem(pixmap)
+        pixmap_item.setPos(0, 0)
+        pixmap_item.setZValue(-100)
+        self.scene.addItem(pixmap_item)
+
+        bg_layer = "背景図面" if "背景図面" in self.layers else self.active_layer
+        self.shapes.append({
+            "type": "image",
+            "file_path": file_path,
+            "pos": (0, 0),
+            "scale": 1.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "layer": bg_layer,
+            "item": pixmap_item
+        })
+        self.scene.setSceneRect(-100000, -100000, 200000, 200000)
+
+    # --- ブロック機能 (main.py連動) ---
+    def create_block_from_selected(self, block_name, category="カスタム", base_point=None):
+        selected_items = self.scene.selectedItems()
+        if not selected_items: return False
+        target_shapes = list(self.shapes)
+        if not base_point:
+            rect = self.scene.createItemGroup(selected_items).boundingRect()
+            base_point = QPointF(rect.center().x(), rect.center().y())
+        bx, by = base_point.x(), base_point.y()
+        rel_shapes = []
+        for s in target_shapes:
+            s_copy = dict(s)
+            stype = s_copy.get("type")
+            if stype in ["line", "dimension", "arrow", "leader", "rect"]:
+                s_copy["p1"] = (s_copy["p1"][0] - bx, s_copy["p1"][1] - by)
+                s_copy["p2"] = (s_copy["p2"][0] - bx, s_copy["p2"][1] - by)
+            elif stype == "circle": 
+                s_copy["center"] = (s_copy["center"][0] - bx, s_copy["center"][1] - by)
+            elif stype == "polyline": 
+                s_copy["points"] = [(px - bx, py - by) for px, py in s_copy["points"]]
+            elif stype in ["point", "text"]: 
+                s_copy["pos"] = (s_copy["pos"][0] - bx, s_copy["pos"][1] - by)
+            rel_shapes.append(s_copy)
+
+        self.blocks[block_name] = {"category": category, "base_pt": (bx, by), "shapes": rel_shapes}
+        self.start_history_record()
+        for item in selected_items: 
+            self.safe_remove_item(item)
+        self.insert_block_ref(block_name, base_point)
+        self.commit_history_record()
+        return True
+
+    def insert_block_ref(self, block_name, pos):
+        if block_name not in self.blocks: return
+        blk_def = self.blocks[block_name]
+        px, py = pos.x(), pos.y()
+        self.start_history_record()
+        group_items = []
+        for s in blk_def["shapes"]:
+            stype = s.get("type")
+            color = self.get_display_color(s.get("color", self.current_color))
+            pen = QPen(color, s.get("thickness", self.current_thickness), s.get("style", self.current_style))
+            if stype == "line": 
+                item = self.scene.addLine(px + s["p1"][0], py + s["p1"][1], px + s["p2"][0], py + s["p2"][1], pen)
+            elif stype == "rect": 
+                item = self.scene.addRect(px + min(s["p1"][0], s["p2"][0]), py + min(s["p1"][1], s["p2"][1]), abs(s["p2"][0] - s["p1"][0]), abs(s["p2"][1] - s["p1"][1]), pen)
+            elif stype == "circle": 
+                item = self.scene.addEllipse(px + s["center"][0] - s["radius"], py + s["center"][1] - s["radius"], 2 * s["radius"], 2 * s["radius"], pen)
+            else: 
+                continue
+            group_items.append(item)
+
+        if group_items:
+            group = self.scene.createItemGroup(group_items)
+            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+            self.shapes.append({
+                "type": "block_ref", "block_name": block_name, "pos": (px, py), 
+                "layer": self.active_layer, "color": self.current_color, 
+                "thickness": self.current_thickness, "style": self.current_style, "item": group
+            })
+        self.commit_history_record()
+
+    def explode_selected_block(self):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        self.start_history_record()
+        for item in selected:
+            if isinstance(item, QGraphicsItemGroup):
+                items_in_group = item.childItems()
+                self.scene.destroyItemGroup(item)
+                for child in items_in_group:
+                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.commit_history_record()
+
+    # --- グループ化機能 (main.py連動) ---
+    def group_selected_items(self):
+        selected = self.scene.selectedItems()
+        if len(selected) < 2:
+            QMessageBox.warning(self, "通知", "グループ化するには2つ以上の要素を選択してください。")
+            return False
+        self.start_history_record()
+        group_item = self.scene.createItemGroup(selected)
+        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.shapes.append({
+            "type": "group", "layer": self.active_layer, "color": self.current_color, 
+            "thickness": self.current_thickness, "style": self.current_style, 
+            "item_count": len(selected), "item": group_item
+        })
+        self.commit_history_record()
+        return True
+
+    def ungroup_selected_items(self):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        self.start_history_record()
+        for item in selected:
+            if isinstance(item, QGraphicsItemGroup):
+                items_in_group = item.childItems()
+                self.scene.destroyItemGroup(item)
+                for child in items_in_group:
+                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.commit_history_record()
+
+    # --- レイヤー・集計制御 (main.py連動) ---
+    def set_active_layer(self, layer_name):
+        if layer_name in self.layers:
+            self.active_layer = layer_name
+            props = self.layers[layer_name]
+            self.current_color = props["color"]
+            self.current_thickness = props["thickness"]
+            self.current_style = props["style"]
+
+    def count_objects_by_layer(self):
+        counts = {}
+        for lyr in self.layers.keys(): counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
+        for s in self.shapes:
+            lyr = s.get("layer", "0")
+            if lyr not in counts: counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
+            stype = s.get("type")
+            counts[lyr]["total"] += 1
+            if stype == "block_ref":
+                counts[lyr]["block_ref"] += 1
+                bname = s.get("block_name", "未定義ブロック")
+                counts[lyr]["blocks_detail"][bname] = counts[lyr]["blocks_detail"].get(bname, 0) + 1
+            elif stype == "group": counts[lyr]["group"] += 1
+            else: counts[lyr]["basic"] += 1
+        return counts
+
+    def auto_trace_region(self, rect):
+        QMessageBox.information(self, "自動トレース", "選択領域の自動トレース機能を起動します。")
+
+    # --- 印刷・PDF書き出し機能 (main.py連動) ---
+    def update_paper_guide(self, size_id=None, orientation=None, scale=None, show=None, custom_rect=None):
+        if size_id is not None: self.paper_size_id = size_id
+        if orientation is not None: self.paper_orientation = orientation
+        if scale is not None: self.paper_scale = scale
+        if show is not None: self.show_paper_guide = show
+
+        if self.paper_guide_item: 
+            self.safe_remove_item(self.paper_guide_item)
+            self.paper_guide_item = None
+            
+        if not self.show_paper_guide: return
+
+        if custom_rect is not None:
+            w_px, h_px, pos_x, pos_y = custom_rect.width(), custom_rect.height(), custom_rect.x(), custom_rect.y()
+        else:
+            mm_sizes = {
+                QPageSize.PageSizeId.A4: (297, 210), QPageSize.PageSizeId.A3: (420, 297), 
+                QPageSize.PageSizeId.A2: (594, 420), QPageSize.PageSizeId.B4: (364, 257), 
+                QPageSize.PageSizeId.B5: (257, 182)
+            }
+            w_mm, h_mm = mm_sizes.get(self.paper_size_id, (297, 210))
+            if self.paper_orientation == QPageLayout.Orientation.Landscape: 
+                w_mm, h_mm = max(w_mm, h_mm), min(w_mm, h_mm)
+            else: 
+                w_mm, h_mm = min(w_mm, h_mm), max(w_mm, h_mm)
+            w_px, h_px, pos_x, pos_y = w_mm * self.paper_scale, h_mm * self.paper_scale, 0, 0
+
+        pen = QPen(QColor(0, 120, 215), max(2, int(self.paper_scale * 0.05)) if custom_rect is None else 2, Qt.PenStyle.DashDotLine)
+        self.paper_guide_item = self.scene.addRect(0, 0, w_px, h_px, pen)
+        self.paper_guide_item.setPos(pos_x, pos_y)
+        self.paper_guide_item.setZValue(-10)
+
+    def fit_paper_guide_to_selected(self):
+        selected = self.scene.selectedItems()
+        target = selected[0] if selected else next((i for i in self.scene.items() if isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem))), None)
+        if target:
+            self.update_paper_guide(show=True, custom_rect=target.sceneBoundingRect())
+            return True
+        return False
+
+    def set_custom_print_rect(self, rect):
+        if self.custom_print_rect_item: 
+            self.safe_remove_item(self.custom_print_rect_item)
+            self.custom_print_rect_item = None
+        if rect and not rect.isEmpty():
+            self.custom_print_rect_item = self.scene.addRect(rect, QPen(QColor(255, 102, 0), 2, Qt.PenStyle.DashDotDotLine))
+            self.custom_print_rect_item.setZValue(99)
+
+    def clear_custom_print_rect(self):
+        if self.custom_print_rect_item: 
+            self.safe_remove_item(self.custom_print_rect_item)
+            self.custom_print_rect_item = None
+
+    def _get_target_render_rect(self):
+        if self.custom_print_rect_item: return self.custom_print_rect_item.sceneBoundingRect()
+        if self.show_paper_guide and self.paper_guide_item: return self.paper_guide_item.sceneBoundingRect()
+        rect = self.scene.itemsBoundingRect()
+        return rect if not rect.isEmpty() else self.scene.sceneRect()
+
+    def print_scene(self):
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPageSize(QPageSize(self.paper_size_id if self.show_paper_guide else QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(self.paper_orientation if self.show_paper_guide else QPageLayout.Orientation.Landscape)
+
+        if QPrintDialog(printer, self).exec() == QPrintDialog.DialogCode.Accepted:
+            self.apply_layer_states(is_export=True)
+
+            if self.paper_guide_item: self.paper_guide_item.setVisible(False)
+            if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(False)
+
+            painter = QPainter(printer)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self.scene.render(painter, QRectF(printer.pageLayout().paintRectPixels(printer.resolution())), self._get_target_render_rect())
+            painter.end()
+
+            if self.paper_guide_item: self.paper_guide_item.setVisible(self.show_paper_guide)
+            if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(True)
+
+            self.apply_layer_states(is_export=False)
+            QMessageBox.information(self, "完了", "印刷処理が完了しました。")
+
+    def export_to_pdf(self, page_size_id, orientation):
+        file_path, _ = QFileDialog.getSaveFileName(self, "PDFファイルとして出力", "", "PDF Files (*.pdf)")
+        if not file_path: return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(file_path)
+        printer.setPageSize(QPageSize(page_size_id))
+        printer.setPageOrientation(orientation)
+
+        self.apply_layer_states(is_export=True)
+
+        if self.paper_guide_item: self.paper_guide_item.setVisible(False)
+        if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(False)
+
+        painter = QPainter(printer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.scene.render(painter, QRectF(printer.pageLayout().paintRectPixels(printer.resolution())), self._get_target_render_rect())
+        painter.end()
+
+        if self.paper_guide_item: self.paper_guide_item.setVisible(self.show_paper_guide)
+        if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(True)
+
+        self.apply_layer_states(is_export=False)
+        QMessageBox.information(self, "成功", f"PDFを出力しました:\n{file_path}")
+
+    # --- プロパティ・レイヤー変更ヘルパー関数 ---
+    def prompt_change_selected_layer(self):
+        layer_names = list(self.layers.keys())
+        current_idx = layer_names.index(self.active_layer) if self.active_layer in layer_names else 0
+        layer_name, ok = QInputDialog.getItem(self, "レイヤー変更", "変更先のレイヤーを選択してください:", layer_names, current_idx, False)
+        if ok and layer_name: self.change_selected_layer(layer_name)
+
+    def change_selected_layer(self, new_layer_name):
+        selected_items = self.scene.selectedItems()
+        if not selected_items or new_layer_name not in self.layers: return
+        self.start_history_record()
+        layer_props = self.layers[new_layer_name]
+        
+        for shape in self.shapes:
+            item = shape.get("item")
+            if item and item.isSelected():
+                shape["layer"] = new_layer_name
+                if shape.get("type") == "image":
+                    item.setZValue(-100 if new_layer_name == "背景図面" else 0)
+                else:
+                    shape["color"] = layer_props["color"]
+                    shape["thickness"] = layer_props["thickness"]
+                    shape["style"] = layer_props["style"]
+
+        self.apply_layer_states()
+        self.commit_history_record()
+
+    def prompt_change_selected_color(self):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        current_color = self.current_color
+        for s in self.shapes:
+            if s.get("item") in selected and "color" in s:
+                current_color = s["color"]; break
+                
+        col = QColorDialog.getColor(current_color, self, "選択した図形の色を個別に変更")
+        if col.isValid(): self.apply_property_to_selected(color=col)
+
+    def prompt_change_selected_style(self):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        
+        current_thickness, current_style = self.current_thickness, self.current_style
+        for s in self.shapes:
+            if s.get("item") in selected:
+                if "thickness" in s: current_thickness = s["thickness"]
+                if "style" in s: current_style = s["style"]
+                break
+
+        thickness, ok1 = QInputDialog.getInt(self, "線の太さ", "線の太さ（1〜20）:", current_thickness, 1, 20, 1)
+        if not ok1: return
+        
+        styles = {"実線 (Solid)": Qt.PenStyle.SolidLine, "破線 (Dash)": Qt.PenStyle.DashLine, "一点鎖線 (DashDot)": Qt.PenStyle.DashDotLine, "点線 (Dot)": Qt.PenStyle.DotLine}
+        style_names = list(styles.keys())
+        curr_style_idx = list(styles.values()).index(current_style) if current_style in styles.values() else 0
+
+        s_name, ok2 = QInputDialog.getItem(self, "線種", "線種を選択:", style_names, curr_style_idx, False)
+        if ok2: self.apply_property_to_selected(thickness=thickness, style=styles[s_name])
+
+    def prompt_edit_layer_settings(self):
+        layer_names = list(self.layers.keys())
+        current_idx = layer_names.index(self.active_layer) if self.active_layer in layer_names else 0
+        layer_name, ok = QInputDialog.getItem(self, "レイヤー設定の一括変更", "デフォルト設定を変更するレイヤーを選択:", layer_names, current_idx, False)
+        if not ok or not layer_name: return
+
+        props = self.layers[layer_name]
+        col = QColorDialog.getColor(props["color"], self, f"[{layer_name}] レイヤーの基本色を選択")
+        if not col.isValid(): return
+
+        thickness, ok2 = QInputDialog.getInt(self, f"[{layer_name}] 線の太さ", "線の太さ（1〜20）:", props["thickness"], 1, 20, 1)
+        if not ok2: return
+
+        styles = {"実線 (Solid)": Qt.PenStyle.SolidLine, "破線 (Dash)": Qt.PenStyle.DashLine, "一点鎖線 (DashDot)": Qt.PenStyle.DashDotLine, "点線 (Dot)": Qt.PenStyle.DotLine}
+        style_names = list(styles.keys())
+        curr_style_idx = list(styles.values()).index(props["style"]) if props["style"] in styles.values() else 0
+
+        s_name, ok3 = QInputDialog.getItem(self, f"[{layer_name}] 線種", "線種を選択:", style_names, curr_style_idx, False)
+        if not ok3: return
+
+        self.start_history_record()
+        self.layers[layer_name]["color"] = col
+        self.layers[layer_name]["thickness"] = thickness
+        self.layers[layer_name]["style"] = styles[s_name]
+
+        if self.active_layer == layer_name:
+            self.current_color = col; self.current_thickness = thickness; self.current_style = styles[s_name]
+
+        for shape in self.shapes:
+            if shape.get("layer") == layer_name:
+                shape["color"] = col; shape["thickness"] = thickness; shape["style"] = styles[s_name]
+
+        self.apply_layer_states()
+        self.commit_history_record()
+        QMessageBox.information(self, "完了", f"レイヤー [{layer_name}] の設定を一括更新しました。")
+
+    def set_selected_image_opacity(self):
+        selected = [i for i in self.scene.selectedItems() if isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem))]
+        if not selected: return
+        current_opacity = int(selected[0].opacity() * 100)
+        val, ok = QInputDialog.getInt(self, "透明度の変更", "不透明度を入力してください (10〜100%):", current_opacity, 10, 100, 5)
+        if ok:
+            new_opacity = val / 100.0
+            self.start_history_record()
+            for item in selected:
+                item.setOpacity(new_opacity)
+                for shape in self.shapes:
+                    if shape.get("item") == item:
+                        shape["opacity"] = new_opacity
+            self.commit_history_record()
+
+    # --- 新規作成・保存・読み込み ---
+    def new_project(self):
+        if self.shapes or any(not isinstance(i, QGraphicsItemGroup) for i in self.scene.items()):
+            res = QMessageBox.question(self, "新規作成", "現在の図面を全消去して新規作成しますか？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if res != QMessageBox.StandardButton.Yes: return False
+
+        self.scene.clear(); self.shapes.clear(); self.undo_stack.clear(); self.redo_stack.clear()
+        self.paper_guide_item, self.custom_print_rect_item = None, None
+        self.set_mode("SELECT")
+        return True
+
+    def save_project_json(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "プロジェクトを保存", "", "CAD Project Files (*.json)")
+        if not file_path: return
+        try:
+            self._sync_item_transforms()
+            data = {"version": "1.0", "layers": _clean_for_json(self.layers), "blocks": _clean_for_json(self.blocks), "shapes": _clean_for_json(self.shapes), "paper_scale": self.paper_scale, "active_layer": self.active_layer}
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False, default=lambda obj: obj.name() if isinstance(obj, QColor) else getattr(obj, "value", str(obj)))
+            QMessageBox.information(self, "成功", f"プロジェクトを保存しました:\n{file_path}")
+        except Exception as e: QMessageBox.critical(self, "エラー", f"保存失敗:\n{e}")
+
+    def load_project_json(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "プロジェクトを開く", "", "CAD Project Files (*.json)")
+        if not file_path: return
+        try:
+            with open(file_path, "r", encoding="utf-8") as f: data = json.load(f)
+            self.scene.clear(); self.shapes.clear(); self.layers.clear()
+
+            for name, props in data.get("layers", {}).items():
+                try: style = Qt.PenStyle(int(props.get("style", 1)))
+                except: style = Qt.PenStyle.SolidLine
+                self.layers[name] = {"color": QColor(props.get("color", "#000000")), "thickness": props.get("thickness", 2), "style": style, "visible": props.get("visible", True), "locked": props.get("locked", False), "printable": props.get("printable", True)}
+
+            self.active_layer, self.paper_scale, self.blocks = data.get("active_layer", "0"), data.get("paper_scale", 100), data.get("blocks", {})
+
+            for s in data.get("shapes", []):
+                s["color"] = QColor(s.get("color", "#FF0000")) if isinstance(s.get("color"), str) else s.get("color")
+                try: s["style"] = Qt.PenStyle(int(s.get("style", 1)))
+                except: s["style"] = Qt.PenStyle.SolidLine
+
+                stype = s.get("type")
+                color = self.get_display_color(s["color"])
+                thickness = s.get("thickness", self.current_thickness)
+                pen = QPen(color, thickness, style)
+
+                if stype == "image":
+                    fpath = s.get("file_path", "")
+                    if fpath and os.path.exists(fpath):
+                        pixmap = pymupdf.open(fpath)[0].get_pixmap(dpi=150) if fpath.lower().endswith('.pdf') else None
+                        pixmap = QPixmap.fromImage(QImage(pixmap.samples, pixmap.width, pixmap.height, pixmap.stride, QImage.Format.Format_RGBA8888 if pixmap.alpha else QImage.Format.Format_RGB888)) if pixmap else QPixmap(fpath)
+                        if pixmap and not pixmap.isNull():
+                            item = CustomPixmapItem(pixmap)
+                            pos_val = s.get("pos", (0, 0))
+                            item.setPos(pos_val[0], pos_val[1])
+                            if "transform" in s:
+                                m = s["transform"]; item.setTransform(QTransform(m[0], m[1], m[2], m[3], m[4], m[5]))
+                            else:
+                                item.setScale(s.get("scale", 1.0)); item.setRotation(s.get("rotation", 0.0))
+                            item.setOpacity(s.get("opacity", 1.0))
+                            if s.get("layer") == "背景図面": item.setZValue(-100)
+                            self.scene.addItem(item); s["item"] = item; self.shapes.append(s)
+                    continue
+
+                elif stype == "dimension": self.create_autocad_dimension(QPointF(*s["p1"]), QPointF(*s["p2"])); continue
+                elif stype == "arrow": item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen); s["item"] = item; self._update_arrow_shape_graphics(s); self.shapes.append(s); continue
+                elif stype == "leader": self.add_leader_with_auto_measure(QPointF(*s["p1"]), QPointF(*s["p2"]), text=s.get("text")); continue
+                elif stype == "rect": item = self.scene.addRect(min(s["p1"][0], s["p2"][0]), min(s["p1"][1], s["p2"][1]), abs(s["p1"][0] - s["p2"][0]), abs(s["p1"][1] - s["p2"][1]), pen)
+                elif stype == "circle": item = self.scene.addEllipse(s["center"][0] - s["radius"], s["center"][1] - s["radius"], 2 * s["radius"], 2 * s["radius"], pen)
+                elif stype == "arc":
+                    path = QPainterPath(); path.arcMoveTo(s["center"][0] - s["radius"], s["center"][1] - s["radius"], 2 * s["radius"], 2 * s["radius"], s["start_angle"])
+                    path.arcTo(s["center"][0] - s["radius"], s["center"][1] - s["radius"], 2 * s["radius"], 2 * s["radius"], s["start_angle"], s["span_angle"])
+                    item = self.scene.addPath(path, pen)
+                elif stype == "table": self.add_table_data(s.get("grid_data", [[""]]), s.get("cell_w", 100), s.get("cell_h", 30), QPointF(*s.get("pos", (0, 0))), align=s.get("align", "CENTER"), font_size=s.get("font_size", 12), color=s.get("color", self.current_color), target_shape=s); continue
+                elif stype == "polyline":
+                    pts = [QPointF(pt[0], pt[1]) for pt in s["points"]]
+                    if s.get("is_closed"): item = self.scene.addPolygon(pts, pen)
+                    else:
+                        path = QPainterPath(); path.moveTo(pts[0])
+                        for pt in pts[1:]: path.lineTo(pt)
+                        item = self.scene.addPath(path, pen)
+                elif stype == "text": item = self.scene.addText(s["text"]); item.setDefaultTextColor(color); item.setFont(QFont("Meiryo", int(s.get("font_size", 12)))); item.setPos(*s["pos"])
+                elif stype == "line": item = self.scene.addLine(s["p1"][0], s["p1"][1], s["p2"][0], s["p2"][1], pen)
+
+                s["item"] = item; self.shapes.append(s)
+
+            self.apply_layer_states()
+            QMessageBox.information(self, "成功", f"プロジェクトを読み込みました:\n{file_path}")
+        except Exception as e: QMessageBox.critical(self, "エラー", f"読み込み失敗:\n{e}")
+
+    # --- DXFインポート/エクスポート ---
+    def import_dxf_file(self, file_path=None):
+        if not file_path: file_path, _ = QFileDialog.getOpenFileName(self, "DXFファイルを開く", "", "DXF Files (*.dxf)")
+        if not file_path or not os.path.exists(file_path): return
+        try:
+            doc = ezdxf.readfile(file_path); msp = doc.modelspace(); self.start_history_record()
+            for entity in msp:
+                dxftype = entity.dxftype()
+                layer_name = entity.dxf.layer if hasattr(entity.dxf, 'layer') else "0"
+                if layer_name not in self.layers: self.layers[layer_name] = {"color": QColor(0, 0, 0), "thickness": 2, "style": Qt.PenStyle.SolidLine, "visible": True, "locked": False, "printable": True}
+                color = self.layers[layer_name]["color"]; pen = QPen(self.get_display_color(color), self.current_thickness, self.current_style)
+
+                if dxftype == 'LINE':
+                    p1, p2 = (entity.dxf.start.x, -entity.dxf.start.y), (entity.dxf.end.x, -entity.dxf.end.y)
+                    item = self.scene.addLine(p1[0], p1[1], p2[0], p2[1], pen)
+                    self.shapes.append({"type": "line", "p1": p1, "p2": p2, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+                elif dxftype == 'CIRCLE':
+                    cx, cy, r = entity.dxf.center.x, -entity.dxf.center.y, entity.dxf.radius
+                    item = self.scene.addEllipse(cx - r, cy - r, 2 * r, 2 * r, pen)
+                    self.shapes.append({"type": "circle", "center": (cx, cy), "radius": r, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+                elif dxftype in ['LWPOLYLINE', 'POLYLINE']:
+                    pts = [(p[0], -p[1]) for p in entity.get_points()]; is_closed = entity.is_closed
+                    qpts = [QPointF(px, py) for px, py in pts]
+                    if is_closed: item = self.scene.addPolygon(QPolygonF(qpts), pen)
+                    else:
+                        path = QPainterPath()
+                        if qpts: path.moveTo(qpts[0]); [path.lineTo(pt) for pt in qpts[1:]]
+                        item = self.scene.addPath(path, pen)
+                    self.shapes.append({"type": "polyline", "points": pts, "is_closed": is_closed, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+                elif dxftype in ['TEXT', 'MTEXT']:
+                    txt = entity.dxf.text if dxftype == 'TEXT' else entity.text
+                    pos = (entity.dxf.insert.x, -entity.dxf.insert.y) if hasattr(entity.dxf, 'insert') else (0, 0)
+                    t_item = self.scene.addText(txt); t_item.setDefaultTextColor(self.get_display_color(color)); t_item.setFont(QFont("Meiryo", 12)); t_item.setPos(pos[0], pos[1])
+                    self.shapes.append({"type": "text", "text": txt, "pos": pos, "font_size": 12, "layer": layer_name, "color": color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
+                elif dxftype == 'IMAGE':
+                    image_def = entity.image_def
+                    if image_def and image_def.dxf.filename and os.path.exists(image_def.dxf.filename):
+                        pixmap = QPixmap(image_def.dxf.filename)
+                        if not pixmap.isNull():
+                            img_w, img_h = pixmap.width(), pixmap.height()
+                            u_pix, v_pix = getattr(entity.dxf, 'u_pixel', (1.0, 0.0)), getattr(entity.dxf, 'v_pixel', (0.0, 1.0))
+                            canvas_px, canvas_py = entity.dxf.insert.x + v_pix[0] * img_h, -(entity.dxf.insert.y + v_pix[1] * img_h)
+                            m11, m12, m21, m22 = u_pix[0], -u_pix[1], -v_pix[0], v_pix[1]
+
+                            item = CustomPixmapItem(pixmap); item.setPos(canvas_px, canvas_py); item.setTransform(QTransform(m11, m12, m21, m22, 0, 0))
+                            if layer_name == "背景図面": item.setZValue(-100)
+                            self.scene.addItem(item)
+                            self.shapes.append({"type": "image", "file_path": image_def.dxf.filename, "pos": (canvas_px, canvas_py), "transform": [m11, m12, m21, m22, 0, 0], "scale": math.hypot(m11, m12), "rotation": math.degrees(math.atan2(-m12, m11)), "opacity": 1.0, "layer": layer_name, "item": item})
+
+            self.apply_layer_states(); self.commit_history_record()
+            QMessageBox.information(self, "成功", f"DXFファイルを読み込みました:\n{os.path.basename(file_path)}")
+        except Exception as e: QMessageBox.critical(self, "エラー", f"DXFインポート失敗:\n{e}")
+
+    def save_to_dxf(self):
+        self.finish_polyline()
+        file_path, _ = QFileDialog.getSaveFileName(self, "DXF形式で保存", "", "DXF Files (*.dxf)")
+        if not file_path: return
+        try:
+            self._sync_item_transforms()
+            doc = ezdxf.new('R2010'); msp = doc.modelspace()
+            for l_name, l_props in self.layers.items():
+                if not doc.layers.has_entry(l_name): doc.layers.add(name=l_name).rgb = (l_props["color"].red(), l_props["color"].green(), l_props["color"].blue())
+
+            for shape in self.shapes:
+                color, layer = shape.get("color", self.current_color), shape.get("layer", "0")
+                attribs = {'true_color': ezdxf.rgb2int((color.red(), color.green(), color.blue())), 'layer': layer}
+                stype = shape.get("type")
+
+                if stype == "image":
+                    fpath = shape.get("file_path", "")
+                    if fpath and os.path.exists(fpath):
+                        pixmap = QPixmap(fpath)
+                        img_w, img_h = pixmap.width(), pixmap.height()
+                        item = shape.get("item")
+                        if item:
+                            scene_tf = item.sceneTransform()
+                            p_bl, p_br, p_tl = scene_tf.map(QPointF(0, img_h)), scene_tf.map(QPointF(img_w, img_h)), scene_tf.map(QPointF(0, 0))
+                            u_vec, v_vec = (p_br.x() - p_bl.x(), -(p_br.y() - p_bl.y())), (p_tl.x() - p_bl.x(), -(p_tl.y() - p_bl.y()))
+                            image_def = doc.add_image_def(filename=fpath, size_in_pixel=(img_w, img_h))
+                            image_entity = msp.add_image(image_def=image_def, insert=(p_bl.x(), -p_bl.y()), size_in_units=(math.hypot(u_vec[0], u_vec[1]), math.hypot(v_vec[0], v_vec[1])), dxfattribs=attribs)
+                            image_entity.dxf.u_pixel, image_entity.dxf.v_pixel = (u_vec[0] / img_w, u_vec[1] / img_w), (v_vec[0] / img_h, v_vec[1] / img_h)
+
+                elif stype == "line": msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                elif stype == "arrow": msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                elif stype == "dimension":
+                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
+                    if shape.get("val_str"): msp.add_text(shape["val_str"], dxfattribs={'height': 12, 'insert': ((shape["p1"][0] + shape["p2"][0])/2, -(shape["p1"][1] + shape["p2"][1])/2)} | attribs)
+                elif stype == "leader":
+                    p1, p2 = shape["p1"], shape["p2"]
+                    p3 = shape.get("p3", (p2[0] + (40 if p2[0] >= p1[0] else -40), p2[1]))
+                    msp.add_line((p1[0], -p1[1]), (p2[0], -p2[1]), dxfattribs=attribs)
+                    msp.add_line((p2[0], -p2[1]), (p3[0], -p3[1]), dxfattribs=attribs)
+                    ang, size = math.atan2(p1[1] - p2[1], p1[0] - p2[0]), max(10, shape.get("thickness", self.current_thickness) * 3.5)
+                    pa1 = (p1[0] - size * math.cos(ang - math.pi / 6), -(p1[1] - size * math.sin(ang - math.pi / 6)))
+                    pa2 = (p1[0] - size * math.cos(ang + math.pi / 6), -(p1[1] - size * math.sin(ang + math.pi / 6)))
+                    if shape.get("arrow_head_type", self.arrow_head_type) == "FILLED": msp.add_solid([(p1[0], -p1[1]), pa1, pa2], dxfattribs=attribs)
+                    else: msp.add_line((p1[0], -p1[1]), pa1, dxfattribs=attribs); msp.add_line((p1[0], -p1[1]), pa2, dxfattribs=attribs)
+                    if shape.get("text"): msp.add_text(shape["text"], dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (p2[0] if p3[0] >= p2[0] else p3[0], -p2[1] + 2)} | attribs)
+                elif stype == "rect": msp.add_lwpolyline([(shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), (shape["p1"][0], -shape["p2"][1])], close=True, dxfattribs=attribs)
+                elif stype == "circle": msp.add_circle((shape["center"][0], -shape["center"][1]), shape["radius"], dxfattribs=attribs)
+                elif stype == "arc": msp.add_arc((shape["center"][0], -shape["center"][1]), shape["radius"], -shape["start_angle"], -shape["start_angle"] - shape["span_angle"], dxfattribs=attribs)
+                elif stype in ["polyline", "spline"]: msp.add_lwpolyline([(x, -y) for x, y in shape["points"]], close=shape.get("is_closed", False), dxfattribs=attribs)
+                elif stype == "text": msp.add_text(shape.get("text", ""), dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (shape["pos"][0], -shape["pos"][1])} | attribs)
+
+            doc.saveas(file_path); QMessageBox.information(self, "成功", f"DXFファイルを保存しました:\n{file_path}")
+        except Exception as e: QMessageBox.critical(self, "エラー", f"DXF保存失敗:\n{e}")
+
+    # --- 直線・オフセット関連コマンド ---
+    def prompt_line_length_settings(self):
+        val, ok = QInputDialog.getDouble(self, "水平・垂直線の長さ指定", "描画する線の長さ（mm）を入力してください\n(0 を指定すると画面端まで伸ばします):", self.preset_line_length, 0.0, 100000.0, 1)
+        if ok: self.preset_line_length = val
+
+    def prompt_offset_settings(self):
+        val, ok = QInputDialog.getDouble(self, "平行線 (オフセット)", "オフセットのピッチ距離（mm）を入力してください:", self.offset_dist, 0.1, 100000.0, 1)
+        if ok and val > 0: self.offset_dist = val; self.execute_exact_offset(val)
+
+    def prompt_xy_offset_settings(self):
+        dx_val, ok1 = QInputDialog.getDouble(self, "X軸方向ピッチ平行複写", "X軸方向（左右）のピッチ距離（mm）:", 50.0, -100000.0, 100000.0, 1)
+        if not ok1: return
+        dy_val, ok2 = QInputDialog.getDouble(self, "Y軸方向ピッチ平行複写", "Y軸方向（上下）のピッチ距離（mm）:", 0.0, -100000.0, 100000.0, 1)
+        if ok2: self.execute_xy_pitch_offset(dx_val, dy_val)
+
+    def execute_exact_offset(self, dist):
+        selected = self.scene.selectedItems()
+        if not selected: QMessageBox.warning(self, "通知", "オフセットする線を選択してください。"); return
+        self.start_history_record(); pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
+
+        for item in selected:
+            shape = next((s for s in self.shapes if s.get("item") == item), None)
+            if not shape: continue
+            if shape.get("type") == "line":
+                p1, p2 = QPointF(*shape["p1"]), QPointF(*shape["p2"])
+                length = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+                if length > 1e-4:
+                    nx, ny = -(p2.y() - p1.y()) / length, (p2.x() - p1.x()) / length
+                    new_p1, new_p2 = (p1.x() + nx * dist, p1.y() + ny * dist), (p2.x() + nx * dist, p2.y() + ny * dist)
+                    o_item = self.scene.addLine(new_p1[0], new_p1[1], new_p2[0], new_p2[1], pen)
+                    self.shapes.append({"type": "line", "p1": new_p1, "p2": new_p2, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
+            elif shape.get("type") == "polyline":
+                ls = LineString(shape["points"]).parallel_offset(dist, 'left')
+                if not ls.is_empty and hasattr(ls, 'coords'):
+                    c_pts = list(ls.coords)
+                    path = QPainterPath(); path.moveTo(QPointF(c_pts[0][0], c_pts[0][1]))
+                    [path.lineTo(QPointF(pt[0], pt[1])) for pt in c_pts[1:]]
+                    o_item = self.scene.addPath(path, pen)
+                    self.shapes.append({"type": "polyline", "points": c_pts, "is_closed": False, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": o_item})
+        self.commit_history_record()
+
+    def execute_xy_pitch_offset(self, dx_pitch, dy_pitch):
+        selected = self.scene.selectedItems()
+        if not selected: QMessageBox.warning(self, "通知", "平行複写するオブジェクトを選択してください。"); return
+        self.start_history_record()
+        for item in selected:
+            for shape in list(self.shapes):
+                if shape.get("item") == item:
+                    s_copy = copy.deepcopy({k: v for k, v in shape.items() if k != "item"})
+                    self._translate_shape(s_copy, dx_pitch, dy_pitch)
+                    new_item = self._recreate_shape_item(s_copy)
+                    if new_item: new_item.setSelected(True); s_copy["item"] = new_item; self.shapes.append(s_copy)
+        self.commit_history_record()
+
+    # --- 各種編集・計測ヘルパー ---
+    def calculate_shape_measurements(self, pos):
+        click_pt = Point(pos.x(), pos.y())
+        target_shape = next((s for s in self.shapes if self._shape_to_shapely(s) and self._shape_to_shapely(s).distance(click_pt) < 20.0), None)
+        if not target_shape: return ""
+        stype = target_shape.get("type")
+
+        if stype in ["line", "dimension", "arrow"]:
+            p1, p2 = target_shape["p1"], target_shape["p2"]
+            length = math.hypot(p2[0] - p1[0], p2[1] - p1[1]) * self.scale_factor
+            return f"L = {length:.1f} mm"
+        elif stype == "rect":
+            w = abs(target_shape["p2"][0] - target_shape["p1"][0]) * self.scale_factor
+            h = abs(target_shape["p2"][1] - target_shape["p1"][1]) * self.scale_factor
+            return f"A = {(w * h) / 1000000.0:.2f} m²\n(L = {2*(w+h):.1f} mm)"
+        elif stype == "circle":
+            r = target_shape["radius"] * self.scale_factor
+            return f"A = {(math.pi * r * r) / 1000000.0:.2f} m²\n(φ = {2*r:.1f} mm)"
+        elif stype == "polyline":
+            pts = target_shape["points"]
+            geom = LineString(pts + [pts[0]]) if target_shape.get("is_closed") else LineString(pts)
+            length_mm = geom.length * self.scale_factor
+            if target_shape.get("is_closed") and len(pts) >= 3:
+                return f"A = {(Polygon(pts).area * (self.scale_factor ** 2)) / 1000000.0:.2f} m²\n(L = {length_mm:.1f} mm)"
+            return f"L = {length_mm:.1f} mm"
+        return ""
+
+    def edit_text_shape(self, shape):
+        if not shape or shape.get("type") != "text": return
+        dlg = TextEditDialog(self, text=shape.get("text", ""), font_size=shape.get("font_size", 12), color=shape.get("color", self.current_color))
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_txt, new_size, new_color = dlg.get_result()
+            if new_txt.strip():
+                self.start_history_record()
+                shape["text"], shape["font_size"], shape["color"] = new_txt.strip(), new_size, new_color
+                item = shape.get("item")
+                if item and isinstance(item, QGraphicsTextItem):
+                    item.setPlainText(new_txt.strip()); item.setFont(QFont("Meiryo", int(new_size))); item.setDefaultTextColor(self.get_display_color(new_color))
+                self.commit_history_record()
+
+    def edit_table_shape(self, shape):
+        if not shape or shape.get("type") != "table": return
+        pos_val = shape.get("pos", (0, 0))
+        dlg = TableEditDialog(self, grid_data=shape.get("grid_data", [[""]]), cell_w=shape.get("cell_w", 100), cell_h=shape.get("cell_h", 30), align=shape.get("align", "CENTER"), font_size=shape.get("font_size", 12), color=shape.get("color", self.current_color))
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_grid, new_w, new_h, new_align, new_fsize, new_color = dlg.get_result()
+            self.add_table_data(new_grid, new_w, new_h, QPointF(pos_val[0], pos_val[1]), align=new_align, font_size=new_fsize, color=new_color, target_shape=shape)
+
+    def add_table_data(self, grid_data, cell_w, cell_h, pos, align="CENTER", font_size=None, color=None, target_shape=None):
+        rows, cols = len(grid_data), max(len(r) for r in grid_data) if grid_data else 0
+        if rows == 0 or cols == 0: return
+        align = str(align).upper()
+        font_size = int(font_size) if font_size is not None else max(10, int(self.current_thickness * 3.5))
+        table_color = QColor(color) if color else self.current_color
+        font = QFont("Meiryo", font_size)
+
+        self.start_history_record()
+        disp_color = self.get_display_color(table_color)
+        pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
+        sx, sy = pos.x(), pos.y()
+        table_items = []
+
+        for r in range(rows + 1): table_items.append(self.scene.addLine(sx, sy + r * cell_h, sx + cols * cell_w, sy + r * cell_h, pen))
+        for c in range(cols + 1): table_items.append(self.scene.addLine(sx + c * cell_w, sy, sx + c * cell_w, sy + rows * cell_h, pen))
+
+        for r in range(rows):
+            for c in range(len(grid_data[r])):
+                val = str(grid_data[r][c]).strip()
+                if val:
+                    t_item = self.scene.addText(val, font); t_item.setDefaultTextColor(disp_color)
+                    t_rect = t_item.boundingRect()
+                    cell_x, cell_y = sx + c * cell_w, sy + r * cell_h
+                    ty = cell_y + (cell_h - t_rect.height()) / 2.0
+                    tx = cell_x + (cell_w - t_rect.width()) / 2.0 if align == "CENTER" else (cell_x + cell_w - t_rect.width() - 5.0 if align == "RIGHT" else cell_x + 5.0)
+                    t_item.setPos(tx, ty); table_items.append(t_item)
+
+        if table_items:
+            group = self.scene.createItemGroup(table_items)
+            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True); group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+            if target_shape and target_shape in self.shapes:
+                if target_shape.get("item"): self.safe_remove_item(target_shape["item"])
+                target_shape.update({"grid_data": grid_data, "cell_w": cell_w, "cell_h": cell_h, "align": align, "font_size": font_size, "color": table_color, "pos": (sx, sy), "item": group})
+            else:
+                self.shapes.append({"type": "table", "grid_data": grid_data, "cell_w": cell_w, "cell_h": cell_h, "align": align, "font_size": font_size, "pos": (sx, sy), "layer": self.active_layer, "color": table_color, "thickness": self.current_thickness, "style": self.current_style, "item": group})
+        self.commit_history_record()
+
+    def create_autocad_dimension(self, p1, p2, offset=25.0):
+        dx, dy = p2.x() - p1.x(), p2.y() - p1.y(); dist = math.hypot(dx, dy)
+        if dist < 1e-4: return
+        angle_rad = math.atan2(dy, dx)
+        nx, ny = -dy / dist, dx / dist
+        p1_ext, p2_ext = QPointF(p1.x() + nx * offset, p1.y() + ny * offset), QPointF(p2.x() + nx * offset, p2.y() + ny * offset)
+
+        disp_color = self.get_display_color(self.current_color)
+        pen_dim, pen_ext = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine), QPen(disp_color, max(1, self.current_thickness - 1), Qt.PenStyle.SolidLine)
+
+        items = [
+            self.scene.addLine(p1.x() + nx * 2, p1.y() + ny * 2, p1_ext.x() + nx * 5, p1_ext.y() + ny * 5, pen_ext),
+            self.scene.addLine(p2.x() + nx * 2, p2.y() + ny * 2, p2_ext.x() + nx * 5, p2_ext.y() + ny * 5, pen_ext),
+            self.scene.addLine(p1_ext.x(), p1_ext.y(), p2_ext.x(), p2_ext.y(), pen_dim)
+        ]
+        items.extend(self._draw_arrow_head_shape(p2_ext, angle_rad, self.arrow_head_type))
+        items.extend(self._draw_arrow_head_shape(p1_ext, angle_rad + math.pi, self.arrow_head_type))
+
+        val_str = f"{dist * self.scale_factor:.1f}"
+        t_item = self.scene.addText(val_str); t_item.setDefaultTextColor(disp_color); t_item.setFont(QFont("Meiryo", int(max(10, self.current_thickness * 3.5))))
+        t_rect = t_item.boundingRect(); t_item.setTransformOriginPoint(t_rect.width() / 2.0, t_rect.height() / 2.0)
+        text_angle = math.degrees(angle_rad)
+        if text_angle > 90 or text_angle < -90: text_angle += 180.0
+        t_item.setRotation(text_angle)
+        t_item.setPos((p1_ext.x() + p2_ext.x()) / 2.0 - t_rect.width() / 2.0 + nx * 8, (p1_ext.y() + p2_ext.y()) / 2.0 - t_rect.height() / 2.0 + ny * 8)
+        items.append(t_item)
+
+        group = self.scene.createItemGroup(items)
+        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True); group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.shapes.append({"type": "dimension", "p1": (p1.x(), p1.y()), "p2": (p2.x(), p2.y()), "val_str": val_str, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": group})
+
+    def create_radius_dimension(self, p1, p2, is_diameter=False):
+        dx, dy = p2.x() - p1.x(), p2.y() - p1.y(); dist = math.hypot(dx, dy)
+        if dist < 1e-4: return
+
+        disp_color = self.get_display_color(self.current_color); pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
+        items = []
+        angle_rad = math.atan2(dy, dx); angle_deg = math.degrees(angle_rad)
+
+        if is_diameter:
+            p0 = QPointF(p1.x() - dx, p1.y() - dy)
+            items.append(self.scene.addLine(p0.x(), p0.y(), p2.x(), p2.y(), pen))
+            items.extend(self._draw_arrow_head_shape(p2, angle_rad, self.arrow_head_type))
+            items.extend(self._draw_arrow_head_shape(p0, angle_rad + math.pi, self.arrow_head_type))
+            val_str = f"φ{dist * 2.0 * self.scale_factor:.1f}"
+        else:
+            items.append(self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen))
+            items.extend(self._draw_arrow_head_shape(p2, angle_rad, self.arrow_head_type))
+            val_str = f"R{dist * self.scale_factor:.1f}"
+
+        t_item = self.scene.addText(val_str); t_item.setDefaultTextColor(disp_color); t_item.setFont(QFont("Meiryo", int(max(10, self.current_thickness * 3.5))))
+        text_angle = angle_deg
+        if text_angle > 90 or text_angle < -90: text_angle += 180.0
+        t_rect = t_item.boundingRect(); t_item.setTransformOriginPoint(t_rect.width() / 2.0, t_rect.height() / 2.0)
+        t_item.setRotation(text_angle)
+        t_item.setPos((p1.x() + p2.x()) / 2.0 - t_rect.width() / 2.0, (p1.y() + p2.y()) / 2.0 - t_rect.height() / 2.0 - 5.0)
+        items.append(t_item)
+
+        group = self.scene.createItemGroup(items)
+        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True); group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.shapes.append({"type": "dimension", "p1": (p1.x(), p1.y()), "p2": (p2.x(), p2.y()), "val_str": val_str, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": group})
+
+    def add_leader_with_auto_measure(self, p1, p2, text=None):
+        if text is None:
+            text = self.calculate_shape_measurements(p1) or QInputDialog.getText(self, "引き出し線注釈", "注釈文字を入力してください:")[0]
+            if not text: return
+
+        disp_color = self.get_display_color(self.current_color); pen = QPen(disp_color, self.current_thickness, self.current_style)
+        leader_items = [self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)]
+        leader_items.extend(self._draw_arrow_head_shape(p1, math.atan2(p1.y() - p2.y(), p1.x() - p2.x())))
+
+        landing = 40 if p2.x() >= p1.x() else -40; p3_x = p2.x() + landing
+        leader_items.append(self.scene.addLine(p2.x(), p2.y(), p3_x, p2.y(), pen))
+
+        t_item = self.scene.addText(text); t_item.setDefaultTextColor(disp_color); t_item.setFont(QFont("Meiryo", int(max(11, self.current_thickness * 4))))
+        rect = t_item.boundingRect()
+        t_item.setPos(p2.x() if landing > 0 else (p3_x - rect.width()), p2.y() - rect.height() + (rect.height() * 0.15))
+        leader_items.append(t_item)
+
+        group = self.scene.createItemGroup(leader_items)
+        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True); group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+
+        shape_data = {"type": "leader", "p1": (p1.x(), p1.y()), "p2": (p2.x(), p2.y()), "p3": (p3_x, p2.y()), "text": text, "font_size": int(max(11, self.current_thickness * 4)), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": group}
+        if not next((s for s in self.shapes if s.get("item") == group), None): self.shapes.append(shape_data)
+        return group
+
+    def reverse_selected_arrows(self):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        self.start_history_record()
+        for shape in self.shapes:
+            if shape.get("item") in selected and shape.get("type") == "arrow":
+                shape["p1"], shape["p2"] = shape["p2"], shape["p1"]
+                self._update_arrow_shape_graphics(shape)
+        self.commit_history_record()
+
+    def change_selected_arrows_style(self, head_type=None, direction=None):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        self.start_history_record()
+        for shape in self.shapes:
+            if shape.get("item") in selected and shape.get("type") == "arrow":
+                if head_type: shape["arrow_head_type"] = head_type
+                if direction: shape["arrow_direction"] = direction
+                self._update_arrow_shape_graphics(shape)
+        self.commit_history_record()
+
+    def prompt_arrow_settings(self):
+        head_types = ["▲ 塗りつぶし (FILLED)", "＞ 開いた線 (OPEN)", "● 黒丸 (DOT)", "/ 建築用斜線 (SLASH)"]
+        directions = ["終点のみ (END)", "始点のみ (START)", "両端 (BOTH)"]
+        type_keys, dir_keys = ["FILLED", "OPEN", "DOT", "SLASH"], ["END", "START", "BOTH"]
+
+        h_idx = type_keys.index(self.arrow_head_type) if self.arrow_head_type in type_keys else 0
+        d_idx = dir_keys.index(self.arrow_direction) if self.arrow_direction in dir_keys else 0
+
+        h_item, ok1 = QInputDialog.getItem(self, "矢印形状の設定", "矢印の頭部形状を選択:", head_types, h_idx, False)
+        if not ok1: return
+        d_item, ok2 = QInputDialog.getItem(self, "矢印向きの設定", "矢印の配置方向を選択:", directions, d_idx, False)
+        if not ok2: return
+
+        self.arrow_head_type = type_keys[head_types.index(h_item)]
+        self.arrow_direction = dir_keys[directions.index(d_item)]
+        if self.scene.selectedItems(): self.change_selected_arrows_style(head_type=self.arrow_head_type, direction=self.arrow_direction)
+
+    def _draw_arrow_head_shape(self, pos, angle, head_type=None):
+        if not head_type: head_type = self.arrow_head_type
+        disp_color = self.get_display_color(self.current_color)
+        size = max(10, self.current_thickness * 3.5)
+        created_items = []
+
+        if head_type == "FILLED":
+            p_a1 = QPointF(pos.x() - size * math.cos(angle - math.pi / 6), pos.y() - size * math.sin(angle - math.pi / 6))
+            p_a2 = QPointF(pos.x() - size * math.cos(angle + math.pi / 6), pos.y() - size * math.sin(angle + math.pi / 6))
+            item = self.scene.addPolygon(QPolygonF([pos, p_a1, p_a2]), QPen(disp_color, 1), QBrush(disp_color))
+            created_items.append(item)
+        elif head_type == "OPEN":
+            p_a1 = QPointF(pos.x() - size * math.cos(angle - math.pi / 6), pos.y() - size * math.sin(angle - math.pi / 6))
+            p_a2 = QPointF(pos.x() - size * math.cos(angle + math.pi / 6), pos.y() - size * math.sin(angle + math.pi / 6))
+            pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
+            created_items.extend([self.scene.addLine(pos.x(), pos.y(), p_a1.x(), p_a1.y(), pen), self.scene.addLine(pos.x(), pos.y(), p_a2.x(), p_a2.y(), pen)])
+        elif head_type == "DOT":
+            r = size * 0.4
+            item = self.scene.addEllipse(pos.x() - r, pos.y() - r, 2 * r, 2 * r, QPen(disp_color, 1), QBrush(disp_color))
+            created_items.append(item)
+        elif head_type == "SLASH":
+            pen = QPen(disp_color, self.current_thickness, Qt.PenStyle.SolidLine)
+            s_angle = angle + math.pi / 4
+            p1 = QPointF(pos.x() - size * 0.6 * math.cos(s_angle), pos.y() - size * 0.6 * math.sin(s_angle))
+            p2 = QPointF(pos.x() + size * 0.6 * math.cos(s_angle), pos.y() + size * 0.6 * math.sin(s_angle))
+            created_items.append(self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen))
+
+        return created_items
+
+    def _update_arrow_shape_graphics(self, shape):
+        if "head_items" in shape:
+            for item in shape["head_items"]: self.safe_remove_item(item)
+            shape["head_items"] = []
+
+        if shape.get("item") and isinstance(shape["item"], QGraphicsLineItem):
+            p1, p2 = shape["p1"], shape["p2"]
+            shape["item"].setLine(p1[0], p1[1], p2[0], p2[1])
+
+            angle_end = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
+            angle_start = math.atan2(p1[1] - p2[1], p1[0] - p2[0])
+            h_type, dir_val = shape.get("arrow_head_type", self.arrow_head_type), shape.get("arrow_direction", self.arrow_direction)
+
+            head_items = []
+            if dir_val in ["END", "BOTH"]: head_items.extend(self._draw_arrow_head_shape(QPointF(p2[0], p2[1]), angle_end, h_type))
+            if dir_val in ["START", "BOTH"]: head_items.extend(self._draw_arrow_head_shape(QPointF(p1[0], p1[1]), angle_start, h_type))
+            shape["head_items"] = head_items
+
+    # --- アングルスナップ・スナップ判定 ---
+    def set_grid_snap(self, enabled, size=None):
+        self.grid_snap_enabled = enabled
+        if size: self.grid_size = float(size)
+
+    def set_angle_snap(self, enabled): self.angle_snap_enabled = enabled
+    def set_otrack_enabled(self, enabled): self.otrack_enabled = enabled; self.clear_tracking_lines()
+
+    def get_snap_points(self, current_pos=None):
+        snaps = []
+        if getattr(self, 'poly_points', None):
+            for i, p_pt in enumerate(self.poly_points):
+                snaps.append((p_pt[0], p_pt[1], "END"))
+                if i > 0:
+                    prev_pt = self.poly_points[i - 1]
+                    snaps.append(((prev_pt[0] + p_pt[0]) / 2.0, (prev_pt[1] + p_pt[1]) / 2.0, "MID"))
+
+        for shape in self.shapes:
+            layer_props = self.layers.get(shape.get("layer", "0"), {})
+            if not layer_props.get("visible", True): continue
+            stype = shape.get("type")
+
+            if stype in ["line", "dimension", "arrow", "leader"]:
+                p1, p2 = shape["p1"], shape["p2"]
+                snaps.extend([(p1[0], p1[1], "END"), (p2[0], p2[1], "END"), ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, "MID")])
+            elif stype == "rect":
+                x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]
+                corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+                for c in corners: snaps.append((c[0], c[1], "END"))
+                for i in range(4):
+                    p_a, p_b = corners[i], corners[(i + 1) % 4]
+                    snaps.append(((p_a[0] + p_b[0]) / 2, (p_a[1] + p_b[1]) / 2, "MID"))
+                snaps.append(((x1 + x2) / 2, (y1 + y2) / 2, "CENTER"))
+            elif stype in ["circle", "arc"]: snaps.append((shape["center"][0], shape["center"][1], "CENTER"))
+            elif stype in ["polyline", "spline"]:
+                pts = shape["points"]
+                for p in pts: snaps.append((p[0], p[1], "END"))
+                for i in range(len(pts) - 1):
+                    snaps.append(((pts[i][0] + pts[i+1][0]) / 2, (pts[i][1] + pts[i+1][1]) / 2, "MID"))
+
+        return snaps
+
+    def get_snapped_pos(self, raw_pos):
+        self.clear_tracking_lines()
+        if self.mode == "SELECT": return raw_pos
+
+        view_scale = self.transform().m11()
+        dynamic_threshold = self.snap_threshold / max(0.001, view_scale)
+
+        if self.grid_snap_enabled and self.grid_size > 0:
+            gx, gy = round(raw_pos.x() / self.grid_size) * self.grid_size, round(raw_pos.y() / self.grid_size) * self.grid_size
+            grid_pt = QPointF(gx, gy)
+            snaps = self.get_snap_points(raw_pos)
+            if not any(math.hypot(raw_pos.x() - x, raw_pos.y() - y) < dynamic_threshold for x, y, _ in snaps):
+                self.update_snap_marker(grid_pt, "GRID")
+                return grid_pt
+
+        snaps = self.get_snap_points(raw_pos)
+        best_pt, best_type, min_dist = raw_pos, None, float("inf")
+
+        for x, y, stype in snaps:
+            dist = math.hypot(raw_pos.x() - x, raw_pos.y() - y)
+            effective_threshold = dynamic_threshold * 1.5 if stype == "END" else dynamic_threshold
+            if dist < effective_threshold:
+                weighted_dist = dist * 0.6 if stype == "END" else dist
+                if weighted_dist < min_dist:
+                    min_dist, best_pt, best_type = weighted_dist, QPointF(x, y), stype
+
+        if min_dist < float("inf"):
+            self.update_snap_marker(best_pt, best_type)
+            return best_pt
+
+        self.update_snap_marker(None, None)
+        return raw_pos
+
+    def update_snap_marker(self, pos, stype):
+        if self.snap_marker: self.safe_remove_item(self.snap_marker); self.snap_marker = None
+        if pos:
+            size, colors = 10, {"END": Qt.GlobalColor.red, "MID": Qt.GlobalColor.yellow, "CENTER": Qt.GlobalColor.blue, "INTER": Qt.GlobalColor.cyan, "GRID": Qt.GlobalColor.magenta}
+            pen = QPen(colors.get(stype, Qt.GlobalColor.green), 2)
+            self.snap_marker = self.scene.addRect(pos.x() - size/2, pos.y() - size/2, size, size, pen)
+            self.snap_marker.setZValue(100)
+
+    def clear_tracking_lines(self):
+        for item in self.tracking_items: self.safe_remove_item(item)
+        self.tracking_items.clear()
+
+    # --- ヘルパー制御関数 ---
+    def apply_angle_snap(self, p1, p2):
+        if not self.angle_snap_enabled or not p1: return p2
+        dx, dy = p2.x() - p1.x(), p2.y() - p1.y(); dist = math.hypot(dx, dy)
+        if dist < 1e-4: return p2
+        snapped_deg = round(math.degrees(math.atan2(dy, dx)) / 15.0) * 15.0
+        return QPointF(p1.x() + dist * math.cos(math.radians(snapped_deg)), p1.y() + dist * math.sin(math.radians(snapped_deg)))
+
     def finish_multi_point_mode(self):
         self.click_points.clear(); self.poly_points.clear()
-        for item in self.poly_temp_items: self.safe_remove_item(item)
+        [self.safe_remove_item(item) for item in self.poly_temp_items]
         self.poly_temp_items.clear(); self.update_snap_marker(None, None)
         if self.temp_item: self.safe_remove_item(self.temp_item); self.temp_item = None
         self.start_point = None
@@ -2200,68 +1680,288 @@ class CADCanvas(QGraphicsView):
     def finish_polyline(self):
         self.start_history_record()
         if self.temp_item: self.safe_remove_item(self.temp_item); self.temp_item = None
-            
         if len(self.poly_points) > 1:
             pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-            if self.mode == "SPLINE":
-                for item in self.poly_temp_items: self.safe_remove_item(item)
-                path = QPainterPath()
-                path.moveTo(QPointF(self.poly_points[0][0], self.poly_points[0][1]))
-                for i in range(1, len(self.poly_points)-1):
-                    p1, p2 = self.poly_points[i], self.poly_points[i+1]
-                    path.quadTo(QPointF(p1[0], p1[1]), QPointF((p1[0]+p2[0])/2, (p1[1]+p2[1])/2))
-                path.lineTo(QPointF(self.poly_points[-1][0], self.poly_points[-1][1]))
-                item = self.scene.addPath(path, pen)
-                self.shapes.append({"type": "spline", "points": list(self.poly_points), "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-            else:
-                is_closed = (self.mode == "POLYGON")
-                path = QPainterPath()
-                path.moveTo(QPointF(self.poly_points[0][0], self.poly_points[0][1]))
-                for p in self.poly_points[1:]: path.lineTo(QPointF(p[0], p[1]))
-                if is_closed: path.closeSubpath()
-                item = self.scene.addPath(path, pen)
-                for tmp in self.poly_temp_items: self.safe_remove_item(tmp)
-                self.shapes.append({"type": "polyline", "points": list(self.poly_points), "is_closed": is_closed, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-        elif len(self.poly_points) == 1:
-            for item in self.poly_temp_items: self.safe_remove_item(item)
-            
-        self.poly_points.clear(); self.poly_temp_items.clear()
-        self.commit_history_record()
-
-    def clear_trim_preview(self):
-        if getattr(self, 'trim_preview_item', None) and self.trim_preview_item.scene() == self.scene:
-            self.scene.removeItem(self.trim_preview_item)
-            self.trim_preview_item = None
+            is_closed = (self.mode == "POLYGON")
+            path = QPainterPath(); path.moveTo(QPointF(self.poly_points[0][0], self.poly_points[0][1]))
+            [path.lineTo(QPointF(p[0], p[1])) for p in self.poly_points[1:]]
+            if is_closed: path.closeSubpath()
+            item = self.scene.addPath(path, pen)
+            [self.safe_remove_item(tmp) for tmp in self.poly_temp_items]
+            self.shapes.append({"type": "polyline", "points": list(self.poly_points), "is_closed": is_closed, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
+        elif len(self.poly_points) == 1: [self.safe_remove_item(item) for item in self.poly_temp_items]
+        self.poly_points.clear(); self.poly_temp_items.clear(); self.commit_history_record()
 
     def set_mode(self, mode):
         self.finish_multi_point_mode()
-        self.clear_trim_preview()
-        self.move_base_pt = None; self.angle_dim_first_line = None
-        self.setMouseTracking(mode in ["TRIM", "BREAK", "TRACE_CALIBRATE", "FILLET"])
-
         if mode in ["ROTATE", "ROTATE_COPY", "SCALE", "SCALE_COPY", "MIRROR", "MIRROR_COPY", "OFFSET", "ARRAY"]:
             self.mode = mode; self.execute_edit_command(); self.set_mode("SELECT"); return
-        elif mode == "HATCH":
-            self.apply_hatching(); self.set_mode("SELECT"); return
-        elif mode == "CLOUD_OBJECT":
-            self.convert_selected_to_cloud(); self.set_mode("SELECT"); return
+        elif mode == "HATCH": self.apply_hatching(); self.set_mode("SELECT"); return
+        elif mode == "CLOUD_OBJECT": self.convert_selected_to_cloud(); self.set_mode("SELECT"); return
 
-        if mode == "REG_POLYGON":
-            sides, ok = QInputDialog.getInt(self, "正多角形作成", "角の数 (角数) を入力してください:", self.preset_poly_sides, 3, 32, 1)
-            if ok: self.preset_poly_sides = sides
-            else: mode = "SELECT"
-
-        self.mode = mode
-        self.mode_changed.emit(mode)
-        is_select = (mode in ["SELECT", "CLOUD_OBJECT", "HATCH", "ROTATE", "ROTATE_COPY", "SCALE", "SCALE_COPY", "MIRROR", "MIRROR_COPY", "OFFSET", "ARRAY", "MOVE", "COPY"])
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag if mode == "SELECT" else QGraphicsView.DragMode.NoDrag)
-
+        self.mode = mode; self.mode_changed.emit(mode)
+        is_select = (mode == "SELECT")
+        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag if is_select else QGraphicsView.DragMode.NoDrag)
         for item in self.scene.items():
             if item not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)):
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_select)
-                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, mode == "SELECT")
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_select)
 
-    # --- マウスイベント制御 ---
+    def set_color(self, color): self.current_color = color; self.apply_property_to_selected(color=color)
+    def set_thickness(self, thickness): self.current_thickness = thickness; self.apply_property_to_selected(thickness=thickness)
+    def set_style(self, style): self.current_style = style; self.apply_property_to_selected(style=style)
+
+    def apply_property_to_selected(self, color=None, thickness=None, style=None):
+        selected_items = self.scene.selectedItems()
+        if not selected_items: return
+        self.start_history_record()
+        for shape in self.shapes:
+            if shape.get("item") in selected_items:
+                if color is not None: shape["color"] = color
+                if thickness is not None: shape["thickness"] = thickness
+                if style is not None: shape["style"] = style
+        self.apply_layer_states(); self.commit_history_record()
+
+    def get_display_color(self, raw_color, is_export=False):
+        if not is_export and self.is_dark_mode and raw_color.red() < 50 and raw_color.green() < 50 and raw_color.blue() < 50:
+            return QColor(255, 255, 255)
+        return raw_color
+
+    def apply_layer_states(self, is_export=False):
+        for shape in list(self.shapes):
+            item = shape.get("item")
+            if not item or item.scene() != self.scene: continue
+            props = self.layers.get(shape.get("layer", "0"), self.layers["0"])
+            item.setVisible(props["visible"] and (props["printable"] if is_export else True))
+            is_movable = (self.mode == "SELECT" and not props["locked"])
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_movable)
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_movable)
+
+            disp_color = self.get_display_color(shape.get("color", props["color"]), is_export=is_export)
+            if hasattr(item, "pen") and hasattr(item, "setPen"):
+                pen = item.pen(); pen.setColor(disp_color); pen.setWidth(shape.get("thickness", props["thickness"])); pen.setStyle(shape.get("style", props["style"])); item.setPen(pen)
+            elif hasattr(item, "setDefaultTextColor"): item.setDefaultTextColor(disp_color)
+
+    def start_history_record(self): self._before_items, self._before_shapes_len = set(self.scene.items()), len(self.shapes)
+
+    def commit_history_record(self):
+        added_items = [i for i in (set(self.scene.items()) - self._before_items) if i not in (self.temp_item, self.snap_marker, self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)) and i not in self.poly_temp_items]
+        added_shapes = self.shapes[self._before_shapes_len:]
+        if added_items or added_shapes: self.undo_stack.append(("add", added_items, added_shapes)); self.redo_stack.clear()
+
+    def undo(self):
+        if not self.undo_stack: return
+        action = self.undo_stack.pop()
+        if action[0] == "add":
+            [self.safe_remove_item(item) for item in action[1]]
+            [self.shapes.remove(s) for s in action[2] if s in self.shapes]
+        self.redo_stack.append(action)
+
+    def redo(self):
+        if not self.redo_stack: return
+        action = self.redo_stack.pop()
+        if action[0] == "add":
+            [self.scene.addItem(item) for item in action[1]]
+            [self.shapes.append(s) for s in action[2]]
+        self.undo_stack.append(action)
+
+    def bring_selected_to_front(self): [i.setZValue(max([item.zValue() for item in self.scene.items()] or [0]) + 1) for i in self.scene.selectedItems()]
+    def send_selected_to_back(self): [i.setZValue(min([item.zValue() for item in self.scene.items()] or [0]) - 1) for i in self.scene.selectedItems()]
+
+    def zoom_in(self): self.scale(self.zoom_factor, self.zoom_factor)
+    def zoom_out(self): self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
+    def zoom_fit(self):
+        rect = self.scene.itemsBoundingRect()
+        if not rect.isEmpty(): self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        else: self.resetTransform()
+
+    # --- 右クリックコンテキストメニュー ---
+    def contextMenuEvent(self, event):
+        item = self.itemAt(event.pos())
+        menu = QMenu(self)
+
+        if item and item not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)):
+            if not item.isSelected():
+                self.scene.clearSelection()
+                item.setSelected(True)
+
+        selected = self.scene.selectedItems()
+        if selected:
+            table_shape = next((s for s in self.shapes if s.get("type") == "table" and (s.get("item") in selected or any(isinstance(s.get("item"), QGraphicsItemGroup) and child in selected for child in s.get("item").childItems()))), None)
+            text_shape = next((s for s in self.shapes if s.get("type") == "text" and s.get("item") in selected), None)
+
+            if table_shape: menu.addAction("📊 表を再編集...", lambda: self.edit_table_shape(table_shape)); menu.addSeparator()
+            if text_shape: menu.addAction("📝 文字を再編集...", lambda: self.edit_text_shape(text_shape)); menu.addSeparator()
+
+            prop_menu = menu.addMenu("⚙️ プロパティ / レイヤー変更")
+            prop_menu.addAction("🏷️ レイヤーを変更...", self.prompt_change_selected_layer)
+            prop_menu.addAction("🎨 選択図形の色を個別に変更...", self.prompt_change_selected_color)
+            prop_menu.addAction("➖ 選択図形の線種・太さを個別に変更...", self.prompt_change_selected_style)
+            menu.addSeparator()
+
+            menu.addAction("📋 複製 (Duplicate)", self.duplicate_selected)
+            menu.addAction("✂ コピー (Ctrl+C)", self.copy_selected_to_clipboard)
+            menu.addAction("🗑 削除 (Delete)", self.delete_selected)
+            menu.addSeparator()
+
+            has_arrow = any(s.get("item") in selected and s.get("type") == "arrow" for s in self.shapes)
+            if has_arrow:
+                arrow_menu = menu.addMenu("🏹 矢印のクイック操作")
+                arrow_menu.addAction("🔃 向きを反転", self.reverse_selected_arrows)
+                arrow_menu.addAction("終点に矢印 (標準)", lambda: self.change_selected_arrows_style(direction="END"))
+                arrow_menu.addAction("始点に矢印", lambda: self.change_selected_arrows_style(direction="START"))
+                arrow_menu.addAction("両端に矢印", lambda: self.change_selected_arrows_style(direction="BOTH"))
+                arrow_menu.addSeparator()
+                arrow_menu.addAction("▲ 塗りつぶし矢印", lambda: self.change_selected_arrows_style(head_type="FILLED"))
+                arrow_menu.addAction("＞ 開いた線矢印", lambda: self.change_selected_arrows_style(head_type="OPEN"))
+                arrow_menu.addAction("● 黒丸 (ドット)", lambda: self.change_selected_arrows_style(head_type="DOT"))
+                arrow_menu.addAction("/ 建築用斜線 (スラッシュ)", lambda: self.change_selected_arrows_style(head_type="SLASH"))
+
+            menu.addSeparator()
+            menu.addAction("↔️ 平行線 (オフセット距離指定)...", self.prompt_offset_settings)
+            menu.addAction("↕️ X軸/Y軸ピッチ平行線...", self.prompt_xy_offset_settings)
+            menu.addSeparator()
+
+            menu.addAction("🔄 90度回転", lambda: self.set_mode("ROTATE"))
+            menu.addAction("🔄 90度回転コピー", lambda: self.set_mode("ROTATE_COPY"))
+            menu.addAction("🪞 左右反転", lambda: self.set_mode("MIRROR"))
+            menu.addAction("🪞 左右反転コピー", lambda: self.set_mode("MIRROR_COPY"))
+            
+            menu.addSeparator()
+            menu.addAction("🎨 ハッチング適用 (HATCH)", self.apply_hatching)
+            menu.addAction("☁️ 雲マークに変換", self.convert_selected_to_cloud)
+            
+            menu.addSeparator()
+            menu.addAction("⬆ 最前面へ移動", self.bring_selected_to_front)
+            menu.addAction("⬇ 最背面へ移動", self.send_selected_to_back)
+            
+            menu.addSeparator()
+            menu.addAction("🔗 線の結合 (JOIN)", self.join_selected_lines)
+            menu.addAction("🎯 中心線生成", self.generate_centerlines)
+            
+            menu.addSeparator()
+            menu.addAction("📦 グループ化", self.group_selected_items)
+            menu.addAction("💥 グループ解除", self.ungroup_selected_items)
+            
+            has_image = any(isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem)) for i in selected)
+            if has_image:
+                menu.addSeparator()
+                menu.addAction("🌫️ 透明度を変更...", self.set_selected_image_opacity)
+
+        else:
+            menu.addAction("📏 水平・垂直線の長さ指定...", self.prompt_line_length_settings)
+            menu.addAction("🏹 矢印の設定 (形状・向き)...", self.prompt_arrow_settings)
+            menu.addSeparator()
+            menu.addAction("⚙️ レイヤー設定 (線種・色) を一括変更...", self.prompt_edit_layer_settings)
+            menu.addSeparator()
+
+            if self.copied_shapes_buffer: 
+                menu.addAction("📋 ペースト (Ctrl+V)", self.paste_from_clipboard)
+                menu.addSeparator()
+            
+            menu.addAction("☑ すべて選択 (Ctrl+A)", lambda: [i.setSelected(True) for i in self.scene.items() if i not in (self.paper_guide_item, getattr(self, 'custom_print_rect_item', None))])
+            menu.addAction("📄 DXFファイルを読み込む...", lambda: self.import_dxf_file())
+            menu.addAction("📄 キャンバスクリア (新規)", self.new_project)
+
+        menu.exec(event.globalPos())
+
+    # --- 境界線抽出・ハッチング機能 ---
+    def _extract_boundaries_from_items(self, items):
+        lines = []
+        for item in items:
+            shape = next((s for s in self.shapes if s.get("item") == item), None)
+            stype = shape.get("type") if shape else None
+
+            if isinstance(item, QGraphicsLineItem) or stype in ["line", "arrow", "leader"]:
+                if shape and "p1" in shape and "p2" in shape: lines.append(LineString([shape["p1"], shape["p2"]]))
+                else:
+                    line = item.line(); p1, p2 = item.mapToScene(line.p1()), item.mapToScene(line.p2())
+                    lines.append(LineString([(p1.x(), p1.y()), (p2.x(), p2.y())]))
+            elif isinstance(item, QGraphicsRectItem) or stype == "rect":
+                rect = item.sceneTransform().mapRect(item.boundingRect()); x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+                lines.append(LineString([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]))
+            elif isinstance(item, QGraphicsEllipseItem) or stype in ["circle", "arc"]:
+                rect = item.sceneTransform().mapRect(item.boundingRect()); cx, cy, rx, ry = rect.center().x(), rect.center().y(), rect.width() / 2.0, rect.height() / 2.0
+                pts = [(cx + rx * math.cos(2 * math.pi * i / 64), cy + ry * math.sin(2 * math.pi * i / 64)) for i in range(65)]
+                lines.append(LineString(pts))
+            elif isinstance(item, QGraphicsPolygonItem) or (shape and shape.get("type") in ["polyline", "spline"]):
+                if shape and "points" in shape:
+                    pts = shape["points"]; pts = pts + [pts[0]] if shape.get("is_closed") and len(pts) >= 3 else pts
+                    if len(pts) >= 2: lines.append(LineString(pts))
+            elif isinstance(item, QGraphicsItemGroup): lines.extend(self._extract_boundaries_from_items(item.childItems()))
+        return lines
+
+    def _item_to_shapely_polygon(self, item):
+        rect = item.sceneTransform().mapRect(item.boundingRect()); x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+        if w <= 0 or h <= 0: return None
+        if isinstance(item, QGraphicsEllipseItem):
+            cx, cy, rx, ry = rect.center().x(), rect.center().y(), w / 2.0, h / 2.0
+            return Polygon([(cx + rx * math.cos(2 * math.pi * i / 64), cy + ry * math.sin(2 * math.pi * i / 64)) for i in range(64)])
+        elif isinstance(item, QGraphicsPolygonItem): return Polygon([(pt.x(), pt.y()) for pt in item.polygon()])
+        elif isinstance(item, QGraphicsRectItem): return Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+        return Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+
+    def apply_hatching(self):
+        selected = self.scene.selectedItems()
+        if not selected: QMessageBox.warning(self, "通知", "ハッチングを行うオブジェクトを選択してください。"); return
+
+        boundary_lines = self._extract_boundaries_from_items(selected)
+        polygonized_polygons = []
+        if boundary_lines:
+            try:
+                for p in list(polygonize(unary_union(boundary_lines))):
+                    if p.is_valid and not p.is_empty and p.area > 1e-3: polygonized_polygons.append(p)
+            except Exception: pass
+
+        single_polygons = [self._item_to_shapely_polygon(item) for item in selected if self._item_to_shapely_polygon(item)]
+        polygons = polygonized_polygons if polygonized_polygons else single_polygons
+
+        if not polygons: QMessageBox.warning(self, "エラー", "交点や端点で囲まれた閉領域が見つかりませんでした。"); return
+
+        target_geom = None
+        if len(polygons) == 1: target_geom = polygons[0]
+        else:
+            options = ["1. 交点・端点で囲まれたすべての閉領域にハッチング", "2. 選択オブジェクト個別にハッチング", "3. 外枠から内側を除外（中抜きハッチング）"]
+            item_str, ok = QInputDialog.getItem(self, "ハッチング範囲の指定", "ハッチングの作図範囲を選択してください:", options, 0, False)
+            if not ok: return
+            if item_str.startswith("1"): target_geom = MultiPolygon(polygons)
+            elif item_str.startswith("2"): target_geom = MultiPolygon(single_polygons if single_polygons else polygons)
+            elif item_str.startswith("3"):
+                p_list = single_polygons if single_polygons else polygons; p_list.sort(key=lambda p: p.area, reverse=True)
+                outer = p_list[0]
+                for inner in p_list[1:]: outer = outer.difference(inner)
+                target_geom = outer
+
+        if target_geom is None or target_geom.is_empty: return
+        self.start_history_record(); pen = QPen(self.get_display_color(self.hatch_color), self.hatch_thickness, self.hatch_style)
+
+        minx, miny, maxx, maxy = target_geom.bounds
+        cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+        diag = math.hypot(maxx - minx, maxy - miny) * 2.0
+        rad, spacing = math.radians(self.hatch_angle), max(2.0, self.hatch_spacing)
+        num_lines = int(diag / spacing) + 1
+
+        for i in range(-num_lines, num_lines + 1):
+            offset = i * spacing
+            rx1 = cx + (-diag) * math.cos(rad) - offset * math.sin(rad)
+            ry1 = cy + (-diag) * math.sin(rad) + offset * math.cos(rad)
+            rx2 = cx + diag * math.cos(rad) - offset * math.sin(rad)
+            ry2 = cy + diag * math.sin(rad) + offset * math.cos(rad)
+
+            try:
+                inter = target_geom.intersection(LineString([(rx1, ry1), (rx2, ry2)]))
+                if not inter.is_empty:
+                    geoms = [inter] if isinstance(inter, LineString) else (list(inter.geoms) if hasattr(inter, 'geoms') else [])
+                    for g in geoms:
+                        if isinstance(g, LineString):
+                            coords = list(g.coords)
+                            h_item = self.scene.addLine(coords[0][0], coords[0][1], coords[-1][0], coords[-1][1], pen)
+                            self.shapes.append({"type": "line", "p1": coords[0], "p2": coords[-1], "layer": self.active_layer, "color": self.hatch_color, "item": h_item})
+            except Exception: pass
+
+        self.commit_history_record()
+
+    # --- マウスイベント（作図と操作） ---
     def wheelEvent(self, event):
         if event.angleDelta().y() > 0: self.zoom_in()
         else: self.zoom_out()
@@ -2291,12 +1991,10 @@ class CADCanvas(QGraphicsView):
                 radius = math.hypot(pos.x() - cx, pos.y() - cy)
                 angle_deg = math.degrees(math.atan2(pos.y() - cy, pos.x() - cx))
                 pts = self._calc_regular_polygon_points_by_angle(cx, cy, radius, self.preset_poly_sides, angle_deg)
-                
                 disp_color = self.get_display_color(self.current_color)
                 pen = QPen(disp_color, self.current_thickness, self.current_style)
                 item = self.scene.addPolygon(QPolygonF([QPointF(px, py) for px, py in pts]), pen, QBrush(Qt.BrushStyle.NoBrush))
                 self.shapes.append({"type": "polyline", "points": pts, "is_closed": True, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
-                
                 self.start_point = None
                 self.set_mode("SELECT")
                 self.commit_history_record()
@@ -2320,11 +2018,7 @@ class CADCanvas(QGraphicsView):
                     t_item.setDefaultTextColor(disp_color)
                     t_item.setFont(QFont("Meiryo", int(font_size)))
                     t_item.setPos(pos)
-                    self.shapes.append({
-                        "type": "text", "text": input_txt.strip(), "pos": (pos.x(), pos.y()),
-                        "font_size": font_size, "layer": self.active_layer, "color": text_color,
-                        "thickness": self.current_thickness, "style": self.current_style, "item": t_item
-                    })
+                    self.shapes.append({"type": "text", "text": input_txt.strip(), "pos": (pos.x(), pos.y()), "font_size": font_size, "layer": self.active_layer, "color": text_color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
             self.set_mode("SELECT")
             self.commit_history_record(); return
 
@@ -2342,9 +2036,7 @@ class CADCanvas(QGraphicsView):
                 self.shapes.append({"type": "circle", "center": (cx, cy), "radius": r, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
             elif self.mode == "PRESET_ARC":
                 r, st, sp = self.preset_arc_r, self.preset_arc_start, self.preset_arc_span
-                path = QPainterPath()
-                path.arcMoveTo(cx - r, cy - r, 2 * r, 2 * r, st)
-                path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, sp)
+                path = QPainterPath(); path.arcMoveTo(cx - r, cy - r, 2 * r, 2 * r, st); path.arcTo(cx - r, cy - r, 2 * r, 2 * r, st, sp)
                 item = self.scene.addPath(path, pen)
                 self.shapes.append({"type": "arc", "center": (cx, cy), "radius": r, "start_angle": st, "span_angle": sp, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
             elif self.mode == "PRESET_POLYGON":
@@ -2433,12 +2125,11 @@ class CADCanvas(QGraphicsView):
 
                 if len(self.poly_points) >= 2:
                     start_p = QPointF(self.poly_points[0][0], self.poly_points[0][1])
-                    if math.hypot(p.x() - start_p.x(), p.y() - start_p.y()) < 1e-3:
-                        if self.mode == "POLYGON":
-                            self.finish_polyline()
-                        else:
-                            self.poly_points.append((start_p.x(), start_p.y()))
-                            self.finish_polyline()
+                    view_scale = self.transform().m11()
+                    snap_pixel_thresh = (self.snap_threshold * 1.5) / max(0.001, view_scale)
+                    if math.hypot(p.x() - start_p.x(), p.y() - start_p.y()) <= snap_pixel_thresh:
+                        if self.mode == "POLYGON": self.finish_polyline()
+                        else: self.poly_points.append((start_p.x(), start_p.y())); self.finish_polyline()
                         self.commit_history_record()
                         return
 
@@ -2753,84 +2444,10 @@ class CADCanvas(QGraphicsView):
         self.shapes.append({"type": "arc", "center": (vx, vy), "radius": r, "start_angle": -a1, "span_angle": -diff, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": item})
         self.shapes.append({"type": "text", "text": val_str, "pos": (tx - 15, ty - 10), "font_size": 12, "layer": self.active_layer, "color": self.current_color, "thickness": self.current_thickness, "style": self.current_style, "item": t_item})
 
-    def add_leader_with_auto_measure(self, p1, p2, text=None):
-        if text is None:
-            auto_text = self.calculate_shape_measurements(p1)
-            if auto_text: text = auto_text
-            else:
-                input_txt, ok = QInputDialog.getText(self, "引き出し線注釈", "注釈文字を入力してください:")
-                if not ok or not input_txt: return
-                text = input_txt
-
-        disp_color = self.get_display_color(self.current_color)
-        pen = QPen(disp_color, self.current_thickness, self.current_style)
-        
-        leader_items = []
-
-        l_item = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
-        leader_items.append(l_item)
-
-        arrow_angle = math.atan2(p1.y() - p2.y(), p1.x() - p2.x())
-        head_items = self._draw_arrow_head_shape(p1, arrow_angle)
-        leader_items.extend(head_items)
-
-        landing = 40 if p2.x() >= p1.x() else -40
-        p3_x = p2.x() + landing
-        land_item = self.scene.addLine(p2.x(), p2.y(), p3_x, p2.y(), pen)
-        leader_items.append(land_item)
-
-        font_sz = int(max(11, self.current_thickness * 4))
-        t_item = self.scene.addText(text)
-        t_item.setDefaultTextColor(disp_color)
-        t_item.setFont(QFont("Meiryo", font_sz))
-        rect = t_item.boundingRect()
-        t_pos_x = p2.x() if landing > 0 else (p3_x - rect.width())
-        t_pos_y = p2.y() - rect.height() + (rect.height() * 0.15)
-        t_item.setPos(t_pos_x, t_pos_y)
-        leader_items.append(t_item)
-
-        group = self.scene.createItemGroup(leader_items)
-        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-
-        shape_data = {
-            "type": "leader", 
-            "p1": (p1.x(), p1.y()), 
-            "p2": (p2.x(), p2.y()), 
-            "p3": (p3_x, p2.y()),
-            "text": text, 
-            "font_size": font_sz,
-            "layer": self.active_layer, 
-            "color": self.current_color, 
-            "thickness": self.current_thickness, 
-            "style": self.current_style, 
-            "item": group
-        }
-
-        existing = next((s for s in self.shapes if s.get("item") == group), None)
-        if not existing:
-            self.shapes.append(shape_data)
-        return group
-
-    def _shape_to_shapely(self, shape):
-        stype = shape.get("type")
-        if stype in ["line", "dimension", "arrow", "leader"]: return LineString([shape["p1"], shape["p2"]])
-        elif stype == "rect": x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]; return LineString([(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)])
-        elif stype in ["circle", "arc"]: cx, cy, r = shape["center"][0], shape["center"][1], shape["radius"]; return Point(cx, cy).buffer(r).boundary
-        elif stype in ["polyline", "spline"]:
-            pts = shape["points"]
-            if len(pts) < 2: return None
-            return LineString(pts + [pts[0]]) if shape.get("is_closed") else LineString(pts)
-        return None
-
-    def _translate_shape(self, shape, dx, dy):
-        stype = shape.get("type")
-        if stype in ["line", "dimension", "arrow", "leader", "rect"]:
-            shape["p1"] = (shape["p1"][0] + dx, shape["p1"][1] + dy)
-            shape["p2"] = (shape["p2"][0] + dx, shape["p2"][1] + dy)
-        elif stype in ["circle", "ellipse", "arc"]: shape["center"] = (shape["center"][0] + dx, shape["center"][1] + dy)
-        elif stype in ["polyline", "spline"]: shape["points"] = [(px + dx, py + dy) for px, py in shape["points"]]
-        elif stype in ["point", "text", "block_ref", "table", "image"]: shape["pos"] = (shape["pos"][0] + dx, shape["pos"][1] + dy)
+    def clear_trim_preview(self):
+        if getattr(self, 'trim_preview_item', None) and self.trim_preview_item.scene() == self.scene:
+            self.scene.removeItem(self.trim_preview_item)
+            self.trim_preview_item = None
 
     def _find_trim_target_and_split(self, pos):
         click_pt = Point(pos.x(), pos.y())
@@ -2868,696 +2485,3 @@ class CADCanvas(QGraphicsView):
             d = seg.distance(click_pt)
             if d < best_dist: best_dist, best_seg = d, seg
         return best_seg, [s for s in segments if s != best_seg], target_shape
-
-    def _find_extend_target(self, pos):
-        click_pt = Point(pos.x(), pos.y())
-        target_shape = None
-        min_dist = 15.0
-        for shape in self.shapes:
-            geom = self._shape_to_shapely(shape)
-            if geom and geom.geom_type in ['LineString', 'MultiLineString']:
-                d = geom.distance(click_pt)
-                if d < min_dist: min_dist, target_shape = d, shape
-        if not target_shape or target_shape.get("type") not in ["line", "polyline"]: return None, None
-
-        stype = target_shape["type"]
-        coords = [target_shape["p1"], target_shape["p2"]] if stype == "line" else target_shape["points"]
-        if len(coords) < 2: return None, None
-
-        p_start, p_end = QPointF(*coords[0]), QPointF(*coords[-1])
-        extend_from_start = math.hypot(pos.x() - p_start.x(), pos.y() - p_start.y()) < math.hypot(pos.x() - p_end.x(), pos.y() - p_end.y())
-        near_pt, far_pt = (p_start, p_end) if extend_from_start else (p_end, p_start)
-
-        dx, dy = near_pt.x() - far_pt.x(), near_pt.y() - far_pt.y()
-        length = math.hypot(dx, dy)
-        if length < 1e-4: return None, None
-
-        ray_ls = LineString([(near_pt.x(), near_pt.y()), (near_pt.x() + (dx / length) * 50000.0, near_pt.y() + (dy / length) * 50000.0)])
-        closest_inter_pt, min_inter_dist = None, float("inf")
-
-        for shape in self.shapes:
-            if shape == target_shape: continue
-            other_geom = self._shape_to_shapely(shape)
-            if other_geom and ray_ls.intersects(other_geom):
-                inter = ray_ls.intersection(other_geom)
-                pts = [inter] if isinstance(inter, Point) else list(inter.geoms) if isinstance(inter, MultiPoint) else []
-                for pt in pts:
-                    dist = math.hypot(pt.x - near_pt.x(), pt.y - near_pt.y())
-                    if 1.0 < dist < min_inter_dist: min_inter_dist, closest_inter_pt = dist, QPointF(pt.x, pt.y)
-
-        if closest_inter_pt:
-            new_shape = dict(target_shape)
-            if stype == "line":
-                if extend_from_start: new_shape["p1"] = (closest_inter_pt.x(), closest_inter_pt.y())
-                else: new_shape["p2"] = (closest_inter_pt.x(), closest_inter_pt.y())
-            elif stype == "polyline":
-                pts = list(target_shape["points"])
-                if extend_from_start: pts[0] = (closest_inter_pt.x(), closest_inter_pt.y())
-                else: pts[-1] = (closest_inter_pt.x(), closest_inter_pt.y())
-                new_shape["points"] = pts
-            return target_shape, new_shape
-        return None, None
-
-    def execute_fillet_chamfer(self, pos):
-        click_pt = Point(pos.x(), pos.y())
-        target_shapes = []
-        for shape in self.shapes:
-            if shape.get("type") == "line":
-                geom = LineString([shape["p1"], shape["p2"]])
-                if geom.distance(click_pt) < 20.0: target_shapes.append(shape)
-        if len(target_shapes) < 2: return
-
-        s1, s2 = target_shapes[0], target_shapes[1]
-        p1, p2 = QPointF(*s1["p1"]), QPointF(*s1["p2"])
-        p3, p4 = QPointF(*s2["p1"]), QPointF(*s2["p2"])
-
-        den = (p1.x()-p2.x())*(p3.y()-p4.y()) - (p1.y()-p2.y())*(p3.x()-p4.x())
-        if den == 0: return 
-        px = ((p1.x()*p2.y() - p1.y()*p2.x())*(p3.x()-p4.x()) - (p1.x()-p2.x())*(p3.x()*p4.y() - p3.y()*p4.x())) / den
-        py = ((p1.x()*p2.y() - p1.y()*p2.x())*(p3.y()-p4.y()) - (p1.y()-p2.y())*(p3.x()*p4.y() - p3.y()*p4.x())) / den
-
-        self.start_history_record()
-        pen1 = QPen(self.get_display_color(s1.get("color", self.current_color)), self.current_thickness, self.current_style)
-        pen2 = QPen(self.get_display_color(s2.get("color", self.current_color)), self.current_thickness, self.current_style)
-
-        item1 = self.scene.addLine(s1["p1"][0], s1["p1"][1], px, py, pen1)
-        item2 = self.scene.addLine(px, py, s2["p2"][0], s2["p2"][1], pen2)
-
-        if s1 in self.shapes: self.shapes.remove(s1)
-        if s2 in self.shapes: self.shapes.remove(s2)
-        
-        self.shapes.append({"type": "line", "p1": s1["p1"], "p2": (px, py), "layer": s1.get("layer", self.active_layer), "color": s1.get("color", self.current_color), "thickness": self.current_thickness, "style": self.current_style, "item": item1})
-        self.shapes.append({"type": "line", "p1": (px, py), "p2": s2["p2"], "layer": s2.get("layer", self.active_layer), "color": s2.get("color", self.current_color), "thickness": self.current_thickness, "style": self.current_style, "item": item2})
-        self.commit_history_record()
-
-    def join_selected_lines(self):
-        selected = self.scene.selectedItems()
-        target_shapes = []
-        for item in selected:
-            for shape in self.shapes:
-                if shape.get("item") == item and shape.get("type") in ["line", "polyline"]:
-                    target_shapes.append(shape)
-
-        if len(target_shapes) < 2:
-            QMessageBox.warning(self, "通知", "結合するには2本以上の線分を選択してください。")
-            return
-
-        self.start_history_record()
-        all_pts = []
-        for s in target_shapes:
-            if s["type"] == "line": all_pts.extend([s["p1"], s["p2"]])
-            elif s["type"] == "polyline": all_pts.extend(s["points"])
-            self.safe_remove_item(s.get("item"))
-        
-        if all_pts:
-            self.scene.clearSelection()
-            pen = QPen(self.get_display_color(self.current_color), self.current_thickness, self.current_style)
-            path = QPainterPath(); path.moveTo(QPointF(all_pts[0][0], all_pts[0][1]))
-            for p in all_pts[1:]: path.lineTo(QPointF(p[0], p[1]))
-            j_item = self.scene.addPath(path, pen)
-            self.shapes.append({"type": "polyline", "points": all_pts, "is_closed": False, "layer": self.active_layer, "color": self.current_color, "item": j_item})
-            self.commit_history_record()
-            QMessageBox.information(self, "結合完了", f"{len(target_shapes)}本の線を結合しました。")
-
-    def generate_centerlines(self):
-        selected = self.scene.selectedItems()
-        if not selected: return
-        self.start_history_record()
-        pen = QPen(self.get_display_color(QColor(255, 100, 0)), 1, Qt.PenStyle.DashDotLine)
-        count = 0
-        for item in selected:
-            rect = item.sceneTransform().mapRect(item.boundingRect())
-            cx, cy = rect.center().x(), rect.center().y()
-            ext = max(rect.width(), rect.height()) / 2 * 1.2
-            l1 = self.scene.addLine(cx - ext, cy, cx + ext, cy, pen)
-            l2 = self.scene.addLine(cx, cy - ext, cx, cy + ext, pen)
-            self.shapes.append({"type": "line", "p1": (cx - ext, cy), "p2": (cx + ext, cy), "layer": "中心線", "color": QColor(255, 100, 0), "item": l1})
-            self.shapes.append({"type": "line", "p1": (cx, cy - ext), "p2": (cx, cy + ext), "layer": "中心線", "color": QColor(255, 100, 0), "item": l2})
-            count += 1
-        self.commit_history_record()
-        if count: QMessageBox.information(self, "完了", f"{count}個のオブジェクトに中心線を生成しました。")
-
-    # --- スナップ・トラッキングヘルパー ---
-    def set_grid_snap(self, enabled, size=None):
-        self.grid_snap_enabled = enabled
-        if size: self.grid_size = float(size)
-
-    def set_angle_snap(self, enabled): self.angle_snap_enabled = enabled
-
-    def apply_angle_snap(self, p1, p2):
-        if not self.angle_snap_enabled or not p1: return p2
-        dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
-        dist = math.hypot(dx, dy)
-        if dist < 1e-4: return p2
-        angle_rad = math.atan2(dy, dx)
-        snapped_deg = round(math.degrees(angle_rad) / 15.0) * 15.0
-        return QPointF(p1.x() + dist * math.cos(math.radians(snapped_deg)), p1.y() + dist * math.sin(math.radians(snapped_deg)))
-
-    def set_otrack_enabled(self, enabled):
-        self.otrack_enabled = enabled; self.clear_tracking_lines()
-
-    def clear_tracking_lines(self):
-        for item in self.tracking_items: self.safe_remove_item(item)
-        self.tracking_items.clear()
-
-    def get_snap_points(self, current_pos=None):
-        snaps = []
-
-        if getattr(self, 'poly_points', None):
-            for i, p_pt in enumerate(self.poly_points):
-                snaps.append((p_pt[0], p_pt[1], "END"))
-                if i > 0:
-                    prev_pt = self.poly_points[i - 1]
-                    snaps.append(((prev_pt[0] + p_pt[0]) / 2.0, (prev_pt[1] + p_pt[1]) / 2.0, "MID"))
-
-        for shape in self.shapes:
-            stype = shape.get("type")
-            if stype in ["line", "dimension", "arrow", "leader"]:
-                p1, p2 = shape["p1"], shape["p2"]
-                snaps.extend([(p1[0], p1[1], "END"), (p2[0], p2[1], "END"), ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, "MID")])
-            elif stype == "rect":
-                x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]
-                corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                for c in corners: snaps.append((c[0], c[1], "END"))
-                for i in range(4):
-                    p_a, p_b = corners[i], corners[(i + 1) % 4]
-                    snaps.append(((p_a[0] + p_b[0]) / 2, (p_a[1] + p_b[1]) / 2, "MID"))
-                snaps.append(((x1 + x2) / 2, (y1 + y2) / 2, "CENTER"))
-            elif stype in ["circle", "arc"]:
-                cx, cy, r = shape["center"][0], shape["center"][1], shape["radius"]
-                snaps.append((cx, cy, "CENTER"))
-            elif stype in ["polyline", "spline"]:
-                pts = shape["points"]
-                for p in pts: snaps.append((p[0], p[1], "END"))
-                for i in range(len(pts) - 1):
-                    snaps.append(((pts[i][0] + pts[i+1][0]) / 2, (pts[i][1] + pts[i+1][1]) / 2, "MID"))
-
-        for item in self.scene.items():
-            if isinstance(item, (QGraphicsPixmapItem, CustomPixmapItem)):
-                rect = item.sceneBoundingRect()
-                x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
-                corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                for c in corners: snaps.append((c[0], c[1], "END"))
-                snaps.append(((x1 + x2) / 2, y1, "MID"))
-                snaps.append(((x1 + x2) / 2, y2, "MID"))
-                snaps.append((x1, (y1 + y2) / 2, "MID"))
-                snaps.append((x2, (y1 + y2) / 2, "MID"))
-                snaps.append(((x1 + x2) / 2, (y1 + y2) / 2, "CENTER"))
-
-        return snaps
-
-    def get_snapped_pos(self, raw_pos):
-        self.clear_tracking_lines()
-        if self.mode == "SELECT": return raw_pos
-
-        if self.grid_snap_enabled and self.grid_size > 0:
-            gx, gy = round(raw_pos.x() / self.grid_size) * self.grid_size, round(raw_pos.y() / self.grid_size) * self.grid_size
-            grid_pt = QPointF(gx, gy)
-            snaps = self.get_snap_points(raw_pos)
-            if not any(math.hypot(raw_pos.x() - x, raw_pos.y() - y) < self.snap_threshold for x, y, _ in snaps):
-                self.update_snap_marker(grid_pt, "GRID")
-                return grid_pt
-
-        snaps = self.get_snap_points(raw_pos)
-        best_pt, best_type, min_dist = raw_pos, None, float("inf")
-
-        for x, y, stype in snaps:
-            dist = math.hypot(raw_pos.x() - x, raw_pos.y() - y)
-            effective_threshold = self.snap_threshold * 1.5 if stype == "END" else self.snap_threshold
-            if dist < effective_threshold:
-                weighted_dist = dist * 0.6 if stype == "END" else dist
-                if weighted_dist < min_dist:
-                    min_dist, best_pt, best_type = weighted_dist, QPointF(x, y), stype
-
-        if min_dist < float("inf"):
-            self.update_snap_marker(best_pt, best_type)
-            return best_pt
-
-        if self.otrack_enabled and snaps:
-            rx, ry = raw_pos.x(), raw_pos.y()
-            track_x, track_y, ref_x_pt, ref_y_pt = None, None, None, None
-            for x, y, _ in snaps:
-                if abs(ry - y) < self.snap_threshold: track_y, ref_y_pt = y, (x, y)
-                if abs(rx - x) < self.snap_threshold: track_x, ref_x_pt = x, (x, y)
-
-            final_x = track_x if track_x is not None else rx
-            final_y = track_y if track_y is not None else ry
-            pen_track = QPen(QColor(0, 180, 255), 1, Qt.PenStyle.DashLine)
-
-            if track_y is not None and ref_y_pt:
-                line = self.scene.addLine(-99999, track_y, 99999, track_y, pen_track)
-                line.setZValue(98); self.tracking_items.append(line)
-            if track_x is not None and ref_x_pt:
-                line = self.scene.addLine(track_x, -99999, track_x, 99999, pen_track)
-                line.setZValue(98); self.tracking_items.append(line)
-
-            if track_x is not None or track_y is not None:
-                snapped_track_pt = QPointF(final_x, final_y)
-                self.update_snap_marker(snapped_track_pt, "INTER")
-                return snapped_track_pt
-
-        self.update_snap_marker(None, None)
-        return raw_pos
-
-    def update_snap_marker(self, pos, stype):
-        if self.snap_marker: self.safe_remove_item(self.snap_marker); self.snap_marker = None
-        if pos:
-            size, colors = 10, {"END": Qt.GlobalColor.red, "MID": Qt.GlobalColor.yellow, "CENTER": Qt.GlobalColor.blue, "INTER": Qt.GlobalColor.cyan, "GRID": Qt.GlobalColor.magenta}
-            pen = QPen(colors.get(stype, Qt.GlobalColor.green), 2)
-            self.snap_marker = self.scene.addRect(pos.x() - size/2, pos.y() - size/2, size, size, pen)
-            self.snap_marker.setZValue(100)
-
-    # --- 色・レイヤーヘルパー ---
-    def get_display_color(self, raw_color, is_export=False):
-        if not is_export and self.is_dark_mode:
-            if raw_color.red() < 50 and raw_color.green() < 50 and raw_color.blue() < 50:
-                return QColor(255, 255, 255)
-        return raw_color
-
-    def refresh_display_colors(self, is_export=False):
-        for shape in self.shapes:
-            item = shape.get("item")
-            if not item or item.scene() != self.scene: continue
-            layer_name = shape.get("layer", "0")
-            props = self.layers.get(layer_name, self.layers["0"])
-            raw_color = shape.get("color", props["color"])
-            disp_color = self.get_display_color(raw_color, is_export=is_export)
-            if hasattr(item, "pen") and hasattr(item, "setPen"):
-                pen = item.pen(); pen.setColor(disp_color); item.setPen(pen)
-            elif hasattr(item, "setDefaultTextColor"):
-                item.setDefaultTextColor(disp_color)
-
-    def apply_layer_states(self, is_export=False):
-        for shape in list(self.shapes):
-            item = shape.get("item")
-            if not item or item.scene() != self.scene: continue
-            layer_name = shape.get("layer", "0")
-            props = self.layers.get(layer_name, self.layers["0"])
-            
-            item.setVisible(props["visible"] and (props["printable"] if is_export else True))
-            is_movable = (self.mode == "SELECT" and not props["locked"])
-            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_movable)
-            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_movable)
-            
-            raw_color = shape.get("color", props["color"])
-            disp_color = self.get_display_color(raw_color, is_export=is_export)
-            thickness = shape.get("thickness", props["thickness"])
-            style = shape.get("style", props["style"])
-            
-            if hasattr(item, "pen") and hasattr(item, "setPen"):
-                pen = item.pen(); pen.setColor(disp_color); pen.setWidth(thickness); pen.setStyle(style); item.setPen(pen)
-            elif hasattr(item, "setDefaultTextColor"):
-                item.setDefaultTextColor(disp_color)
-        self.refresh_display_colors(is_export=is_export)
-
-    def set_active_layer(self, layer_name):
-        if layer_name in self.layers:
-            self.active_layer = layer_name
-            props = self.layers[layer_name]
-            self.current_color = props["color"]
-            self.current_thickness = props["thickness"]
-            self.current_style = props["style"]
-
-    # --- 履歴管理 ---
-    def start_history_record(self):
-        self._before_items = set(self.scene.items())
-        self._before_shapes_len = len(self.shapes)
-
-    def commit_history_record(self):
-        added_items = list(set(self.scene.items()) - self._before_items)
-        added_items = [i for i in added_items if i not in (self.temp_item, self.snap_marker, self.paper_guide_item, getattr(self, 'custom_print_rect_item', None)) and i not in self.poly_temp_items and i != getattr(self, 'trim_preview_item', None)]
-        added_shapes = self.shapes[self._before_shapes_len:]
-        if added_items or added_shapes:
-            self.undo_stack.append(("add", added_items, added_shapes))
-            self.redo_stack.clear()
-
-    def undo(self):
-        if not self.undo_stack: return
-        action = self.undo_stack.pop()
-        if action[0] == "add":
-            for item in action[1]: self.safe_remove_item(item)
-            for s in action[2]:
-                if s in self.shapes: self.shapes.remove(s)
-        self.redo_stack.append(action)
-
-    def redo(self):
-        if not self.redo_stack: return
-        action = self.redo_stack.pop()
-        if action[0] == "add":
-            for item in action[1]: self.scene.addItem(item)
-            for s in action[2]: self.shapes.append(s)
-        self.undo_stack.append(action)
-
-    # --- 基本・設定変更機能 ---
-    def set_color(self, color): self.current_color = color; self.apply_property_to_selected(color=color)
-    def set_thickness(self, thickness): self.current_thickness = thickness; self.apply_property_to_selected(thickness=thickness)
-    def set_style(self, style): self.current_style = style; self.apply_property_to_selected(style=style)
-    def set_cloud_pitch(self, pitch): self.cloud_pitch = pitch
-    def set_cloud_arc_height(self, height): self.cloud_arc_height = height
-
-    def apply_property_to_selected(self, color=None, thickness=None, style=None):
-        selected_items = self.scene.selectedItems()
-        if not selected_items: return
-        self.start_history_record()
-        for shape in self.shapes:
-            item = shape.get("item")
-            if item and item in selected_items:
-                if color is not None: shape["color"] = color
-                if thickness is not None: shape["thickness"] = thickness
-                if style is not None: shape["style"] = style
-        self.apply_layer_states()
-        self.commit_history_record()
-
-    def bring_selected_to_front(self):
-        for item in self.scene.selectedItems(): item.setZValue(max([i.zValue() for i in self.scene.items()] or [0]) + 1)
-    def send_selected_to_back(self):
-        for item in self.scene.selectedItems(): item.setZValue(min([i.zValue() for i in self.scene.items()] or [0]) - 1)
-
-    def count_objects_by_layer(self):
-        counts = {}
-        for lyr in self.layers.keys(): counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
-        for s in self.shapes:
-            lyr = s.get("layer", "0")
-            if lyr not in counts: counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
-            stype = s.get("type")
-            counts[lyr]["total"] += 1
-            if stype == "block_ref":
-                counts[lyr]["block_ref"] += 1
-                bname = s.get("block_name", "未定義ブロック")
-                counts[lyr]["blocks_detail"][bname] = counts[lyr]["blocks_detail"].get(bname, 0) + 1
-            elif stype == "group": counts[lyr]["group"] += 1
-            else: counts[lyr]["basic"] += 1
-        return counts
-
-    def change_selected_layer(self, new_layer_name):
-        selected_items = self.scene.selectedItems()
-        if not selected_items or new_layer_name not in self.layers: return
-        self.start_history_record()
-        for shape in self.shapes:
-            item = shape.get("item")
-            if item and item.isSelected(): shape["layer"] = new_layer_name
-        self.apply_layer_states()
-        self.commit_history_record()
-
-    def prompt_change_selected_layer(self):
-        layer_names = list(self.layers.keys())
-        current_idx = layer_names.index(self.active_layer) if self.active_layer in layer_names else 0
-        layer_name, ok = QInputDialog.getItem(self, "レイヤー変更", "変更先のレイヤーを選択してください:", layer_names, current_idx, False)
-        if ok and layer_name: self.change_selected_layer(layer_name)
-
-    def set_selected_image_opacity(self):
-        selected = [i for i in self.scene.selectedItems() if isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem))]
-        if not selected: return
-        current_opacity = int(selected[0].opacity() * 100)
-        val, ok = QInputDialog.getInt(self, "透明度の変更", "不透明度を入力してください (10〜100%):", current_opacity, 10, 100, 5)
-        if ok:
-            new_opacity = val / 100.0
-            self.start_history_record()
-            for item in selected:
-                item.setOpacity(new_opacity)
-                for shape in self.shapes:
-                    if shape.get("item") == item:
-                        shape["opacity"] = new_opacity
-            self.commit_history_record()
-
-    # --- ヘルパー処理 ---
-    def safe_remove_item(self, item):
-        if isinstance(item, list):
-            for i in item:
-                if i and i.scene() == self.scene: self.scene.removeItem(i)
-        elif item and item.scene() == self.scene:
-            self.scene.removeItem(item)
-
-    def set_canvas_bg_color(self, bg_type):
-        if bg_type == "DARK":
-            self.setBackgroundBrush(QBrush(QColor(30, 30, 30))); self.is_dark_mode = True
-        elif bg_type == "WHITE":
-            self.setBackgroundBrush(QBrush(QColor(255, 255, 255))); self.is_dark_mode = False
-        elif bg_type == "GRAY":
-            self.setBackgroundBrush(QBrush(QColor(220, 220, 220))); self.is_dark_mode = False
-        self.apply_layer_states(is_export=False)
-
-    # --- 入出力 & 印刷機能 ---
-    def save_to_dxf(self):
-        self.finish_polyline()
-        file_path, _ = QFileDialog.getSaveFileName(self, "DXF形式で保存", "", "DXF Files (*.dxf)")
-        if not file_path: return
-        try:
-            self._sync_item_transforms()
-            doc = ezdxf.new('R2010')
-            msp = doc.modelspace()
-            for l_name, l_props in self.layers.items():
-                if not doc.layers.has_entry(l_name):
-                    c = l_props["color"]
-                    layer = doc.layers.add(name=l_name)
-                    layer.rgb = (c.red(), c.green(), c.blue())
-
-            for shape in self.shapes:
-                color = shape.get("color", self.current_color)
-                layer = shape.get("layer", "0")
-                attribs = {'true_color': ezdxf.rgb2int((color.red(), color.green(), color.blue())), 'layer': layer}
-                stype = shape.get("type")
-
-                if stype == "image":
-                    fpath = shape.get("file_path", "")
-                    if fpath and os.path.exists(fpath):
-                        try:
-                            if fpath.lower().endswith('.pdf'):
-                                doc_pdf = pymupdf.open(fpath)
-                                pix = doc_pdf[0].get_pixmap(dpi=150)
-                                img_w, img_h = pix.width, pix.height
-                            else:
-                                pixmap = QPixmap(fpath)
-                                img_w, img_h = pixmap.width(), pixmap.height()
-
-                            item = shape.get("item")
-                            if item:
-                                scene_tf = item.sceneTransform()
-                                p_bl = scene_tf.map(QPointF(0, img_h))
-                                p_br = scene_tf.map(QPointF(img_w, img_h))
-                                p_tl = scene_tf.map(QPointF(0, 0))
-
-                                dxf_insert = (p_bl.x(), -p_bl.y())
-                                u_vec = (p_br.x() - p_bl.x(), -(p_br.y() - p_bl.y()))
-                                v_vec = (p_tl.x() - p_bl.x(), -(p_tl.y() - p_bl.y()))
-
-                                w_units = math.hypot(u_vec[0], u_vec[1])
-                                h_units = math.hypot(v_vec[0], v_vec[1])
-
-                                image_def = doc.add_image_def(filename=fpath, size_in_pixel=(img_w, img_h))
-                                image_entity = msp.add_image(
-                                    image_def=image_def,
-                                    insert=dxf_insert,
-                                    size_in_units=(w_units, h_units),
-                                    dxfattribs=attribs
-                                )
-                                image_entity.dxf.u_pixel = (u_vec[0] / img_w, u_vec[1] / img_w)
-                                image_entity.dxf.v_pixel = (v_vec[0] / img_h, v_vec[1] / img_h)
-                        except Exception:
-                            pass
-
-                elif stype == "line":
-                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
-                elif stype == "arrow":
-                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
-                elif stype == "dimension":
-                    msp.add_line((shape["p1"][0], -shape["p1"][1]), (shape["p2"][0], -shape["p2"][1]), dxfattribs=attribs)
-                    val_str = shape.get("val_str", "")
-                    if val_str:
-                        mx = (shape["p1"][0] + shape["p2"][0]) / 2.0
-                        my = -(shape["p1"][1] + shape["p2"][1]) / 2.0
-                        msp.add_text(val_str, dxfattribs={'height': 12, 'insert': (mx, my)} | attribs)
-                elif stype == "leader":
-                    p1 = shape["p1"]
-                    p2 = shape["p2"]
-                    p3 = shape.get("p3", (p2[0] + (40 if p2[0] >= p1[0] else -40), p2[1]))
-                    txt = shape.get("text", "")
-
-                    msp.add_line((p1[0], -p1[1]), (p2[0], -p2[1]), dxfattribs=attribs)
-                    msp.add_line((p2[0], -p2[1]), (p3[0], -p3[1]), dxfattribs=attribs)
-
-                    ang = math.atan2(p1[1] - p2[1], p1[0] - p2[0])
-                    size = max(10, shape.get("thickness", self.current_thickness) * 3.5)
-                    h_type = shape.get("arrow_head_type", self.arrow_head_type)
-
-                    p1_dxf = (p1[0], -p1[1])
-                    pa1 = (p1[0] - size * math.cos(ang - math.pi / 6), -(p1[1] - size * math.sin(ang - math.pi / 6)))
-                    pa2 = (p1[0] - size * math.cos(ang + math.pi / 6), -(p1[1] - size * math.sin(ang + math.pi / 6)))
-
-                    if h_type == "FILLED":
-                        msp.add_solid([p1_dxf, pa1, pa2], dxfattribs=attribs)
-                    else:
-                        msp.add_line(p1_dxf, pa1, dxfattribs=attribs)
-                        msp.add_line(p1_dxf, pa2, dxfattribs=attribs)
-
-                    if txt:
-                        tx = p2[0] if p3[0] >= p2[0] else p3[0]
-                        ty = -p2[1] + 2
-                        msp.add_text(txt, dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (tx, ty)} | attribs)
-                elif stype == "rect":
-                    x1, y1, x2, y2 = shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1]
-                    msp.add_lwpolyline([(x1, -y1), (x2, -y1), (x2, -y2), (x1, -y2)], close=True, dxfattribs=attribs)
-                elif stype == "circle":
-                    msp.add_circle((shape["center"][0], -shape["center"][1]), shape["radius"], dxfattribs=attribs)
-                elif stype == "arc":
-                    cx, cy = shape["center"][0], -shape["center"][1]
-                    r = shape["radius"]
-                    st = -shape["start_angle"]
-                    sp = -shape["span_angle"]
-                    msp.add_arc((cx, cy), r, st, st + sp, dxfattribs=attribs)
-                elif stype in ["polyline", "spline"]:
-                    msp.add_lwpolyline([(x, -y) for x, y in shape["points"]], close=shape.get("is_closed", False), dxfattribs=attribs)
-                elif stype == "text":
-                    msp.add_text(shape.get("text", ""), dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (shape["pos"][0], -shape["pos"][1])} | attribs)
-                elif stype == "table":
-                    grid_data = shape.get("grid_data", [])
-                    cell_w = shape.get("cell_w", 100)
-                    cell_h = shape.get("cell_h", 30)
-                    sx, sy = shape["pos"][0], shape["pos"][1]
-                    rows = len(grid_data)
-                    cols = max(len(r) for r in grid_data) if grid_data else 0
-                    for r in range(rows + 1):
-                        msp.add_line((sx, -(sy + r * cell_h)), (sx + cols * cell_w, -(sy + r * cell_h)), dxfattribs=attribs)
-                    for c in range(cols + 1):
-                        msp.add_line((sx + c * cell_w, -sy), (sx + c * cell_w, -(sy + rows * cell_h)), dxfattribs=attribs)
-                    for r in range(rows):
-                        for c in range(len(grid_data[r])):
-                            val = str(grid_data[r][c]).strip()
-                            if val:
-                                tx = sx + c * cell_w + 5
-                                ty = -(sy + r * cell_h + cell_h / 2)
-                                msp.add_text(val, dxfattribs={'height': int(shape.get("font_size", 12)), 'insert': (tx, ty)} | attribs)
-
-            doc.saveas(file_path)
-            QMessageBox.information(self, "成功", f"DXFファイルを保存しました:\n{file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"DXF保存失敗:\n{e}")
-
-    def import_jww_file(self, file_path):
-        if not os.path.exists(file_path): return
-        try:
-            self.start_history_record()
-            with open(file_path, "rb") as f:
-                header = f.read(16)
-                if not header.startswith(b"JWW_Drawing_Data"):
-                    QMessageBox.warning(self, "エラー", "有効な Jw_cad (.jww) ファイルではありません。")
-                    return
-            jww_layer_name = f"JWW_{os.path.basename(file_path)}"
-            if jww_layer_name not in self.layers:
-                self.layers[jww_layer_name] = {"color": QColor(0, 100, 200), "thickness": 2, "style": Qt.PenStyle.SolidLine, "visible": True, "locked": False, "printable": True}
-            QMessageBox.information(self, "完了", f"JWW図面要素を取り込みました:\n{os.path.basename(file_path)}")
-            self.commit_history_record()
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"JWW読み込み失敗:\n{e}")
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls(): event.acceptProposedAction()
-        else: super().dragEnterEvent(event)
-
-    def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            file_path = url.toLocalFile()
-            if file_path:
-                ext = os.path.splitext(file_path)[1].lower()
-                if ext in ['.jww', '.jws']: self.import_jww_file(file_path)
-                elif ext == '.dxf': self.import_dxf_file(file_path)
-                else: self.insert_image_or_pdf(file_path, self.mapToScene(event.position().toPoint()))
-        event.acceptProposedAction()
-
-    def update_paper_guide(self, size_id=None, orientation=None, scale=None, show=None, custom_rect=None):
-        if size_id is not None: self.paper_size_id = size_id
-        if orientation is not None: self.paper_orientation = orientation
-        if scale is not None: self.paper_scale = scale
-        if show is not None: self.show_paper_guide = show
-
-        if self.paper_guide_item: self.safe_remove_item(self.paper_guide_item); self.paper_guide_item = None
-        if not self.show_paper_guide: return
-
-        if custom_rect is not None:
-            w_px, h_px, pos_x, pos_y = custom_rect.width(), custom_rect.height(), custom_rect.x(), custom_rect.y()
-        else:
-            mm_sizes = {QPageSize.PageSizeId.A4: (297, 210), QPageSize.PageSizeId.A3: (420, 297), QPageSize.PageSizeId.A2: (594, 420), QPageSize.PageSizeId.B4: (364, 257), QPageSize.PageSizeId.B5: (257, 182)}
-            w_mm, h_mm = mm_sizes.get(self.paper_size_id, (297, 210))
-            if self.paper_orientation == QPageLayout.Orientation.Landscape: w_mm, h_mm = max(w_mm, h_mm), min(w_mm, h_mm)
-            else: w_mm, h_mm = min(w_mm, h_mm), max(w_mm, h_mm)
-            w_px, h_px, pos_x, pos_y = w_mm * self.paper_scale, h_mm * self.paper_scale, 0, 0
-
-        pen = QPen(QColor(0, 120, 215), max(2, int(self.paper_scale * 0.05)) if custom_rect is None else 2, Qt.PenStyle.DashDotLine)
-        self.paper_guide_item = self.scene.addRect(0, 0, w_px, h_px, pen)
-        self.paper_guide_item.setPos(pos_x, pos_y); self.paper_guide_item.setZValue(-10)
-
-    def fit_paper_guide_to_selected(self):
-        selected = self.scene.selectedItems()
-        target = selected[0] if selected else next((i for i in self.scene.items() if isinstance(i, (QGraphicsPixmapItem, CustomPixmapItem))), None)
-        if target:
-            self.update_paper_guide(show=True, custom_rect=target.sceneBoundingRect())
-            return True
-        return False
-
-    def set_custom_print_rect(self, rect):
-        if self.custom_print_rect_item: self.safe_remove_item(self.custom_print_rect_item); self.custom_print_rect_item = None
-        if rect and not rect.isEmpty():
-            self.custom_print_rect_item = self.scene.addRect(rect, QPen(QColor(255, 102, 0), 2, Qt.PenStyle.DashDotDotLine))
-            self.custom_print_rect_item.setZValue(99)
-
-    def clear_custom_print_rect(self):
-        if self.custom_print_rect_item: self.safe_remove_item(self.custom_print_rect_item); self.custom_print_rect_item = None
-
-    def _get_target_render_rect(self):
-        if self.custom_print_rect_item: return self.custom_print_rect_item.sceneBoundingRect()
-        if self.show_paper_guide and self.paper_guide_item: return self.paper_guide_item.sceneBoundingRect()
-        rect = self.scene.itemsBoundingRect()
-        return rect if not rect.isEmpty() else self.scene.sceneRect()
-
-    def print_scene(self):
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setPageSize(QPageSize(self.paper_size_id if self.show_paper_guide else QPageSize.PageSizeId.A4))
-        printer.setPageOrientation(self.paper_orientation if self.show_paper_guide else QPageLayout.Orientation.Landscape)
-
-        if QPrintDialog(printer, self).exec() == QPrintDialog.DialogCode.Accepted:
-            self.apply_layer_states(is_export=True)
-
-            if self.paper_guide_item: self.paper_guide_item.setVisible(False)
-            if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(False)
-
-            painter = QPainter(printer)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self.scene.render(painter, QRectF(printer.pageLayout().paintRectPixels(printer.resolution())), self._get_target_render_rect())
-            painter.end()
-
-            if self.paper_guide_item: self.paper_guide_item.setVisible(self.show_paper_guide)
-            if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(True)
-
-            self.apply_layer_states(is_export=False)
-            QMessageBox.information(self, "完了", "印刷処理が完了しました。")
-
-    def export_to_pdf(self, page_size_id, orientation):
-        file_path, _ = QFileDialog.getSaveFileName(self, "PDFファイルとして出力", "", "PDF Files (*.pdf)")
-        if not file_path: return
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-        printer.setOutputFileName(file_path)
-        printer.setPageSize(QPageSize(page_size_id)); printer.setPageOrientation(orientation)
-
-        self.apply_layer_states(is_export=True)
-
-        if self.paper_guide_item: self.paper_guide_item.setVisible(False)
-        if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(False)
-
-        painter = QPainter(printer)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.scene.render(painter, QRectF(printer.pageLayout().paintRectPixels(printer.resolution())), self._get_target_render_rect())
-        painter.end()
-
-        if self.paper_guide_item: self.paper_guide_item.setVisible(self.show_paper_guide)
-        if self.custom_print_rect_item: self.custom_print_rect_item.setVisible(True)
-
-        self.apply_layer_states(is_export=False)
-        QMessageBox.information(self, "成功", f"PDFを出力しました:\n{file_path}")
-
-    def zoom_in(self): self.scale(self.zoom_factor, self.zoom_factor)
-    def zoom_out(self): self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
-    def zoom_fit(self):
-        rect = self.scene.itemsBoundingRect()
-        if not rect.isEmpty(): self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
-        else: self.resetTransform()
