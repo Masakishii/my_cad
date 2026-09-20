@@ -13,315 +13,16 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QInputDialog, QMessa
                              QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem, 
                              QGraphicsItemGroup, QApplication, QMenu, QDialog,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QLabel, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit, QColorDialog, QFontComboBox, QCheckBox)
+                             QPushButton, QLabel, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit, QColorDialog)
 from PyQt6.QtGui import (QPen, QColor, QPixmap, QPolygonF, QBrush, QFont, QImage, 
                          QPainterPath, QPainter, QPageSize, QPageLayout, QTransform)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 
-
-def _clean_for_json(obj):
-    """JSONエンコード可能な型へ安全にシリアライズ"""
-    if isinstance(obj, QColor):
-        return obj.name()
-    elif hasattr(obj, "value"):
-        return obj.value
-    elif isinstance(obj, dict):
-        return {k: _clean_for_json(v) for k, v in obj.items() if k not in ("item", "head_items")}
-    elif isinstance(obj, (list, tuple)):
-        return [_clean_for_json(i) for i in obj]
-    return obj
-
-
-class CustomPixmapItem(QGraphicsPixmapItem):
-    """アフィン変換（QTransform）対応の完全同期型 PixmapItem"""
-    def __init__(self, pixmap, parent=None):
-        super().__init__(pixmap, parent)
-        self.setFlags(
-            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
-            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
-        )
-        self.setAcceptHoverEvents(True)
-        self.handle_size = 14.0
-        self.active_handle = None
-        self.setTransformOriginPoint(0, 0)
-
-    def setPixmap(self, pixmap):
-        super().setPixmap(pixmap)
-        self.setTransformOriginPoint(0, 0)
-
-    def boundingRect(self):
-        rect = super().boundingRect()
-        margin = self.handle_size + 30.0
-        return rect.adjusted(-margin, -margin, margin, margin)
-
-    def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
-        if self.isSelected():
-            painter.save()
-            rect = super().boundingRect()
-            sc = max(0.001, self.scale())
-            
-            pen = QPen(QColor(0, 120, 215), 2.0 / sc, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect)
-
-            s = self.handle_size / sc
-            painter.setBrush(QBrush(QColor(0, 120, 215)))
-            painter.setPen(QPen(QColor(255, 255, 255), 1.0 / sc))
-
-            for h_rect in self._get_handle_rects(rect, s).values():
-                painter.drawRect(h_rect)
-
-            rot_pt = QPointF(rect.center().x(), rect.top() - s * 2.5)
-            painter.drawLine(QPointF(rect.center().x(), rect.top()), rot_pt)
-            painter.drawEllipse(rot_pt, s / 2.0, s / 2.0)
-            painter.restore()
-
-    def _get_handle_rects(self, rect, s):
-        return {
-            "TL": QRectF(rect.left() - s/2, rect.top() - s/2, s, s),
-            "TR": QRectF(rect.right() - s/2, rect.top() - s/2, s, s),
-            "BL": QRectF(rect.left() - s/2, rect.bottom() - s/2, s, s),
-            "BR": QRectF(rect.right() - s/2, rect.bottom() - s/2, s, s),
-        }
-
-    def _get_rotation_handle_pos(self, rect, s):
-        return QPointF(rect.center().x(), rect.top() - s * 2.5)
-
-    def hoverMoveEvent(self, event):
-        if self.isSelected():
-            rect = super().boundingRect()
-            s = self.handle_size / max(0.001, self.scale())
-            rot_pos = self._get_rotation_handle_pos(rect, s)
-            pos = event.pos()
-
-            if math.hypot(pos.x() - rot_pos.x(), pos.y() - rot_pos.y()) <= s:
-                self.setCursor(Qt.CursorShape.PointingHandCursor)
-                return
-            for h_rect in self._get_handle_rects(rect, s).values():
-                if h_rect.contains(pos):
-                    self.setCursor(Qt.CursorShape.SizeAllCursor)
-                    return
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-        super().hoverMoveEvent(event)
-
-    def mousePressEvent(self, event):
-        if self.isSelected() and event.button() == Qt.MouseButton.LeftButton:
-            rect = super().boundingRect()
-            s = self.handle_size / max(0.001, self.scale())
-            handles = self._get_handle_rects(rect, s)
-            rot_pos = self._get_rotation_handle_pos(rect, s)
-            pos = event.pos()
-
-            if math.hypot(pos.x() - rot_pos.x(), pos.y() - rot_pos.y()) <= s:
-                self.active_handle = "ROTATE"
-                event.accept()
-                return
-
-            for h_name, h_rect in handles.items():
-                if h_rect.contains(pos):
-                    self.active_handle = h_name
-                    self.initial_scale = self.scale()
-                    self.center_scene_pos = self.scenePos()
-                    self.initial_dist = math.hypot(
-                        event.scenePos().x() - self.center_scene_pos.x(),
-                        event.scenePos().y() - self.center_scene_pos.y()
-                    )
-                    event.accept()
-                    return
-
-        self.active_handle = None
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self.active_handle == "ROTATE":
-            center_scene = self.mapToScene(super().boundingRect().center())
-            curr_pos = event.scenePos()
-            angle = math.degrees(math.atan2(curr_pos.y() - center_scene.y(), curr_pos.x() - center_scene.x())) + 90.0
-            self.setRotation(angle)
-            return
-
-        elif self.active_handle in ["TL", "TR", "BL", "BR"]:
-            curr_dist = math.hypot(event.scenePos().x() - self.center_scene_pos.x(), event.scenePos().y() - self.center_scene_pos.y())
-            if getattr(self, "initial_dist", 0) > 0:
-                self.setScale(max(0.01, self.initial_scale * (curr_dist / self.initial_dist)))
-            return
-
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self.active_handle = None
-        super().mouseReleaseEvent(event)
-
-
-class TextEditDialog(QDialog):
-    """文字編集ダイアログ"""
-    def __init__(self, parent=None, text="", font_size=12, color=None, font_family="Meiryo", bold=False, italic=False):
-        super().__init__(parent)
-        self.setWindowTitle("文章の入力・高度な書式編集")
-        self.resize(480, 380)
-        self.selected_color = QColor(color) if color else QColor(255, 0, 0)
-
-        layout = QVBoxLayout(self)
-        
-        cfg_layout1 = QHBoxLayout()
-        cfg_layout1.addWidget(QLabel("フォント:"))
-        self.font_combo = QFontComboBox()
-        self.font_combo.setCurrentFont(QFont(font_family))
-        cfg_layout1.addWidget(self.font_combo)
-
-        cfg_layout1.addWidget(QLabel("サイズ(pt):"))
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(6, 500)
-        self.size_spin.setValue(int(font_size))
-        cfg_layout1.addWidget(self.size_spin)
-        layout.addLayout(cfg_layout1)
-
-        cfg_layout2 = QHBoxLayout()
-        self.bold_check = QCheckBox("太字 (Bold)")
-        self.bold_check.setChecked(bold)
-        cfg_layout2.addWidget(self.bold_check)
-
-        self.italic_check = QCheckBox("斜体 (Italic)")
-        self.italic_check.setChecked(italic)
-        cfg_layout2.addWidget(self.italic_check)
-
-        self.color_btn = QPushButton(" 色を選択 ")
-        self.update_color_button_style()
-        self.color_btn.clicked.connect(self.choose_color)
-        cfg_layout2.addWidget(self.color_btn)
-        cfg_layout2.addStretch()
-        layout.addLayout(cfg_layout2)
-
-        layout.addWidget(QLabel("テキスト:"))
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(text)
-        layout.addWidget(self.text_edit)
-
-        btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("OK")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("キャンセル")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addStretch()
-        btn_layout.addWidget(ok_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-    def choose_color(self):
-        col = QColorDialog.getColor(self.selected_color, self, "文字色の選択")
-        if col.isValid():
-            self.selected_color = col
-            self.update_color_button_style()
-
-    def update_color_button_style(self):
-        txt_col = "#000000" if (self.selected_color.red()*0.299 + self.selected_color.green()*0.587 + self.selected_color.blue()*0.114) > 180 else "#FFFFFF"
-        self.color_btn.setStyleSheet(f"background-color: {self.selected_color.name()}; color: {txt_col}; font-weight: bold; border: 1px solid #888;")
-
-    def get_result(self):
-        return (self.text_edit.toPlainText(), self.size_spin.value(), self.selected_color, 
-                self.font_combo.currentFont().family(), self.bold_check.isChecked(), self.italic_check.isChecked())
-
-
-class TableEditDialog(QDialog):
-    """表データ編集ダイアログ"""
-    def __init__(self, parent=None, grid_data=None, cell_w=100, cell_h=30, align="CENTER", font_size=12, color=None, font_family="Meiryo", bold=False, italic=False):
-        super().__init__(parent)
-        self.setWindowTitle("表データの詳細再編集")
-        self.resize(720, 520)
-        self.grid_data = copy.deepcopy(grid_data) if grid_data else [[""]]
-        self.selected_color = QColor(color) if color else QColor(0, 0, 0)
-
-        main_layout = QVBoxLayout(self)
-        
-        cfg_layout1 = QHBoxLayout()
-        self.w_spin = QDoubleSpinBox()
-        self.w_spin.setRange(10.0, 2000.0); self.w_spin.setValue(float(cell_w))
-        cfg_layout1.addWidget(QLabel("セル幅:"))
-        cfg_layout1.addWidget(self.w_spin)
-
-        self.h_spin = QDoubleSpinBox()
-        self.h_spin.setRange(5.0, 1000.0); self.h_spin.setValue(float(cell_h))
-        cfg_layout1.addWidget(QLabel("セル高:"))
-        cfg_layout1.addWidget(self.h_spin)
-
-        self.font_combo = QFontComboBox()
-        self.font_combo.setCurrentFont(QFont(font_family))
-        cfg_layout1.addWidget(QLabel("フォント:"))
-        cfg_layout1.addWidget(self.font_combo)
-
-        self.font_spin = QSpinBox()
-        self.font_spin.setRange(6, 200); self.font_spin.setValue(int(font_size))
-        cfg_layout1.addWidget(QLabel("サイズ:"))
-        cfg_layout1.addWidget(self.font_spin)
-        main_layout.addLayout(cfg_layout1)
-
-        cfg_layout2 = QHBoxLayout()
-        self.bold_check = QCheckBox("太字"); self.bold_check.setChecked(bold)
-        self.italic_check = QCheckBox("斜体"); self.italic_check.setChecked(italic)
-        cfg_layout2.addWidget(self.bold_check)
-        cfg_layout2.addWidget(self.italic_check)
-
-        self.color_btn = QPushButton(" 色を選択 ")
-        self.update_color_button_style()
-        self.color_btn.clicked.connect(self.choose_color)
-        cfg_layout2.addWidget(self.color_btn)
-
-        self.align_combo = QComboBox()
-        self.align_combo.addItems(["中央 (CENTER)", "左寄せ (LEFT)", "右寄せ (RIGHT)"])
-        align_map = {"CENTER": 0, "LEFT": 1, "RIGHT": 2}
-        self.align_combo.setCurrentIndex(align_map.get(str(align).upper(), 0))
-        cfg_layout2.addWidget(QLabel("揃え:"))
-        cfg_layout2.addWidget(self.align_combo)
-        cfg_layout2.addStretch()
-        main_layout.addLayout(cfg_layout2)
-
-        btn_layout = QHBoxLayout()
-        add_r = QPushButton("＋ 行追加"); add_r.clicked.connect(lambda: self.table_widget.insertRow(self.table_widget.rowCount()))
-        del_r = QPushButton("－ 行削除"); del_r.clicked.connect(lambda: self.table_widget.removeRow(max(0, self.table_widget.currentRow())))
-        add_c = QPushButton("＋ 列追加"); add_c.clicked.connect(lambda: self.table_widget.insertColumn(self.table_widget.columnCount()))
-        del_c = QPushButton("－ 列削除"); del_c.clicked.connect(lambda: self.table_widget.removeColumn(max(0, self.table_widget.currentColumn())))
-        btn_layout.addWidget(add_r); btn_layout.addWidget(del_r); btn_layout.addWidget(add_c); btn_layout.addWidget(del_c)
-        main_layout.addLayout(btn_layout)
-
-        self.table_widget = QTableWidget()
-        self.populate_table()
-        main_layout.addWidget(self.table_widget)
-
-        dlg_btns = QHBoxLayout()
-        ok_btn = QPushButton("OK"); ok_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("キャンセル"); cancel_btn.clicked.connect(self.reject)
-        dlg_btns.addStretch(); dlg_btns.addWidget(ok_btn); dlg_btns.addWidget(cancel_btn)
-        main_layout.addLayout(dlg_btns)
-
-    def choose_color(self):
-        col = QColorDialog.getColor(self.selected_color, self, "文字色の選択")
-        if col.isValid():
-            self.selected_color = col
-            self.update_color_button_style()
-
-    def update_color_button_style(self):
-        txt_col = "#000000" if (self.selected_color.red()*0.299 + self.selected_color.green()*0.587 + self.selected_color.blue()*0.114) > 180 else "#FFFFFF"
-        self.color_btn.setStyleSheet(f"background-color: {self.selected_color.name()}; color: {txt_col}; font-weight: bold; border: 1px solid #888;")
-
-    def populate_table(self):
-        rows, cols = len(self.grid_data), max(len(r) for r in self.grid_data) if self.grid_data else 1
-        self.table_widget.setRowCount(rows); self.table_widget.setColumnCount(cols)
-        for r in range(rows):
-            for c in range(cols):
-                val = self.grid_data[r][c] if c < len(self.grid_data[r]) else ""
-                self.table_widget.setItem(r, c, QTableWidgetItem(str(val)))
-
-    def get_result(self):
-        rows, cols = self.table_widget.rowCount(), self.table_widget.columnCount()
-        res_grid = [[self.table_widget.item(r, c).text() if self.table_widget.item(r, c) else "" for c in range(cols)] for r in range(rows)]
-        align_list = ["CENTER", "LEFT", "RIGHT"]
-        return (res_grid, self.w_spin.value(), self.h_spin.value(), align_list[self.align_combo.currentIndex()], 
-                self.font_spin.value(), self.selected_color, self.font_combo.currentFont().family(), 
-                self.bold_check.isChecked(), self.italic_check.isChecked())
+# --- 分割モジュールからのインポート ---
+from cad_utils import _clean_for_json
+from cad_items import CustomPixmapItem
+from cad_dialogs import TextEditDialog, TableEditDialog
 
 
 class CADCanvas(QGraphicsView):
@@ -501,7 +202,7 @@ class CADCanvas(QGraphicsView):
                 pts = shape["points"]
                 for p in pts: snaps.append((p[0], p[1], "END"))
                 for i in range(len(pts) - 1):
-                    snaps.append(((pts[i][0] + pts[i+1][0]) / 2, (pts[i][1] + pts[i+1][1]) / 2, "MID"))
+                    snaps.append(((pts[i][0] + pts[i+1][0]) / 2, (pts[i][1] + pts[i+1][0]) / 2, "MID"))
 
         return snaps
 
@@ -868,37 +569,7 @@ class CADCanvas(QGraphicsView):
                     self.insert_image_or_pdf(file_path, self.mapToScene(event.position().toPoint()))
         event.acceptProposedAction()
 
-    # --- グループ化・ブロック制御 ---
-    def group_selected_items(self):
-        selected = self.scene.selectedItems()
-        if len(selected) < 2:
-            QMessageBox.warning(self, "通知", "グループ化するには2つ以上の要素を選択してください。")
-            return False
-        self.start_history_record()
-        group_item = self.scene.createItemGroup(selected)
-        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.shapes.append({
-            "type": "group", "layer": self.active_layer, "color": self.current_color, 
-            "thickness": self.current_thickness, "style": self.current_style, 
-            "item_count": len(selected), "item": group_item
-        })
-        self.commit_history_record()
-        return True
-
-    def ungroup_selected_items(self):
-        selected = self.scene.selectedItems()
-        if not selected: return
-        self.start_history_record()
-        for item in selected:
-            if isinstance(item, QGraphicsItemGroup):
-                items_in_group = item.childItems()
-                self.scene.destroyItemGroup(item)
-                for child in items_in_group:
-                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.commit_history_record()
-
+    # --- ブロック機能 (main.py連動) ---
     def create_block_from_selected(self, block_name, category="カスタム", base_point=None):
         selected_items = self.scene.selectedItems()
         if not selected_items: return False
@@ -974,7 +645,66 @@ class CADCanvas(QGraphicsView):
                     child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.commit_history_record()
 
-    # --- 印刷・PDF書き出し機能 ---
+    # --- グループ化機能 (main.py連動) ---
+    def group_selected_items(self):
+        selected = self.scene.selectedItems()
+        if len(selected) < 2:
+            QMessageBox.warning(self, "通知", "グループ化するには2つ以上の要素を選択してください。")
+            return False
+        self.start_history_record()
+        group_item = self.scene.createItemGroup(selected)
+        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        group_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.shapes.append({
+            "type": "group", "layer": self.active_layer, "color": self.current_color, 
+            "thickness": self.current_thickness, "style": self.current_style, 
+            "item_count": len(selected), "item": group_item
+        })
+        self.commit_history_record()
+        return True
+
+    def ungroup_selected_items(self):
+        selected = self.scene.selectedItems()
+        if not selected: return
+        self.start_history_record()
+        for item in selected:
+            if isinstance(item, QGraphicsItemGroup):
+                items_in_group = item.childItems()
+                self.scene.destroyItemGroup(item)
+                for child in items_in_group:
+                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                    child.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.commit_history_record()
+
+    # --- レイヤー・集計制御 (main.py連動) ---
+    def set_active_layer(self, layer_name):
+        if layer_name in self.layers:
+            self.active_layer = layer_name
+            props = self.layers[layer_name]
+            self.current_color = props["color"]
+            self.current_thickness = props["thickness"]
+            self.current_style = props["style"]
+
+    def count_objects_by_layer(self):
+        counts = {}
+        for lyr in self.layers.keys(): counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
+        for s in self.shapes:
+            lyr = s.get("layer", "0")
+            if lyr not in counts: counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
+            stype = s.get("type")
+            counts[lyr]["total"] += 1
+            if stype == "block_ref":
+                counts[lyr]["block_ref"] += 1
+                bname = s.get("block_name", "未定義ブロック")
+                counts[lyr]["blocks_detail"][bname] = counts[lyr]["blocks_detail"].get(bname, 0) + 1
+            elif stype == "group": counts[lyr]["group"] += 1
+            else: counts[lyr]["basic"] += 1
+        return counts
+
+    def auto_trace_region(self, rect):
+        QMessageBox.information(self, "自動トレース", "選択領域の自動トレース機能を起動します。")
+
+    # --- 印刷・PDF書き出し機能 (main.py連動) ---
     def update_paper_guide(self, size_id=None, orientation=None, scale=None, show=None, custom_rect=None):
         if size_id is not None: self.paper_size_id = size_id
         if orientation is not None: self.paper_orientation = orientation
@@ -1082,33 +812,6 @@ class CADCanvas(QGraphicsView):
         QMessageBox.information(self, "成功", f"PDFを出力しました:\n{file_path}")
 
     # --- プロパティ・レイヤー変更ヘルパー関数 ---
-    def set_active_layer(self, layer_name):
-        if layer_name in self.layers:
-            self.active_layer = layer_name
-            props = self.layers[layer_name]
-            self.current_color = props["color"]
-            self.current_thickness = props["thickness"]
-            self.current_style = props["style"]
-
-    def count_objects_by_layer(self):
-        counts = {}
-        for lyr in self.layers.keys(): counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
-        for s in self.shapes:
-            lyr = s.get("layer", "0")
-            if lyr not in counts: counts[lyr] = {"total": 0, "basic": 0, "block_ref": 0, "group": 0, "blocks_detail": {}}
-            stype = s.get("type")
-            counts[lyr]["total"] += 1
-            if stype == "block_ref":
-                counts[lyr]["block_ref"] += 1
-                bname = s.get("block_name", "未定義ブロック")
-                counts[lyr]["blocks_detail"][bname] = counts[lyr]["blocks_detail"].get(bname, 0) + 1
-            elif stype == "group": counts[lyr]["group"] += 1
-            else: counts[lyr]["basic"] += 1
-        return counts
-
-    def auto_trace_region(self, rect):
-        QMessageBox.information(self, "自動トレース", "選択領域の自動トレース機能を起動します。")
-
     def prompt_change_selected_layer(self):
         layer_names = list(self.layers.keys())
         current_idx = layer_names.index(self.active_layer) if self.active_layer in layer_names else 0
@@ -1217,6 +920,12 @@ class CADCanvas(QGraphicsView):
                     if shape.get("item") == item:
                         shape["opacity"] = new_opacity
             self.commit_history_record()
+
+    def set_canvas_bg_color(self, bg_type):
+        self.is_dark_mode = (bg_type == "DARK")
+        bg_colors = {"DARK": QColor(30, 30, 30), "WHITE": QColor(255, 255, 255), "GRAY": QColor(220, 220, 220)}
+        self.setBackgroundBrush(QBrush(bg_colors.get(bg_type, QColor(255, 255, 255))))
+        self.apply_layer_states(is_export=False)
 
     # --- 直線・オフセット関連コマンド ---
     def prompt_line_length_settings(self):
@@ -1680,6 +1389,156 @@ class CADCanvas(QGraphicsView):
         rect = self.scene.itemsBoundingRect()
         if not rect.isEmpty(): self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
         else: self.resetTransform()
+
+    # --- クリップボード・複製機能 ---
+    def copy_selected_to_clipboard(self):
+        selected_items = self.scene.selectedItems()
+        if not selected_items: return
+        self.copied_shapes_buffer.clear()
+        for shape in self.shapes:
+            item = shape.get("item")
+            if item and item.isSelected():
+                s_copy = copy.deepcopy({k: v for k, v in shape.items() if k != "item"})
+                self.copied_shapes_buffer.append(s_copy)
+
+    def paste_from_clipboard(self):
+        if not self.copied_shapes_buffer: return
+        self.start_history_record()
+        self.scene.clearSelection()
+        cursor_pos = self.mapToScene(self.mapFromGlobal(self.cursor().pos()))
+        
+        xs, ys = [], []
+        for s in self.copied_shapes_buffer:
+            stype = s.get("type")
+            if stype in ["line", "dimension", "arrow", "leader", "rect"]:
+                xs.extend([s["p1"][0], s["p2"][0]]); ys.extend([s["p1"][1], s["p2"][1]])
+            elif stype in ["circle", "ellipse", "arc"]:
+                xs.append(s["center"][0]); ys.append(s["center"][1])
+            elif stype in ["polyline", "spline"]:
+                xs.extend([p[0] for p in s["points"]]); ys.extend([p[1] for p in s["points"]])
+            elif stype in ["point", "text", "block_ref", "table", "image"]:
+                xs.append(s["pos"][0]); ys.append(s["pos"][1])
+
+        center_x = sum(xs) / len(xs) if xs else 0
+        center_y = sum(ys) / len(ys) if ys else 0
+        dx, dy = cursor_pos.x() - center_x, cursor_pos.y() - center_y
+
+        for s in self.copied_shapes_buffer:
+            new_s = copy.deepcopy(s)
+            self._translate_shape(new_s, dx, dy)
+            item = self._recreate_shape_item(new_s)
+            if item:
+                item.setSelected(True)
+                new_s["item"] = item
+                self.shapes.append(new_s)
+        self.commit_history_record()
+
+    def duplicate_selected(self):
+        selected_items = self.scene.selectedItems()
+        if not selected_items: return
+        self.start_history_record()
+        self.scene.clearSelection()
+        for shape in list(self.shapes):
+            item = shape.get("item")
+            if item and item in selected_items:
+                s_copy = copy.deepcopy({k: v for k, v in shape.items() if k != "item"})
+                self._translate_shape(s_copy, 20.0, 20.0)
+                new_item = self._recreate_shape_item(s_copy)
+                if new_item:
+                    new_item.setSelected(True)
+                    s_copy["item"] = new_item
+                    self.shapes.append(s_copy)
+        self.commit_history_record()
+
+    def delete_selected(self):
+        deleted_items = self.scene.selectedItems()
+        if deleted_items:
+            self.start_history_record()
+            for item in deleted_items:
+                self.safe_remove_item(item)
+                for shape in list(self.shapes):
+                    if shape.get("item") == item:
+                        self.shapes.remove(shape)
+            self.commit_history_record()
+
+    def _clone_item(self, item):
+        pen = item.pen() if hasattr(item, "pen") else QPen()
+        brush = item.brush() if hasattr(item, "brush") else QBrush()
+        new_item = None
+        if isinstance(item, QGraphicsLineItem): new_item = self.scene.addLine(item.line(), pen)
+        elif isinstance(item, QGraphicsRectItem): new_item = self.scene.addRect(item.rect(), pen, brush)
+        elif isinstance(item, QGraphicsEllipseItem): new_item = self.scene.addEllipse(item.rect(), pen, brush)
+        elif isinstance(item, QGraphicsPolygonItem): new_item = self.scene.addPolygon(item.polygon(), pen, brush)
+        elif isinstance(item, QGraphicsPathItem): new_item = self.scene.addPath(item.path(), pen)
+        elif isinstance(item, QGraphicsTextItem): new_item = self.scene.addText(item.toPlainText(), item.font()); new_item.setDefaultTextColor(item.defaultTextColor())
+        elif isinstance(item, (QGraphicsPixmapItem, CustomPixmapItem)): new_item = CustomPixmapItem(item.pixmap())
+        if new_item:
+            new_item.setPos(item.pos()); new_item.setRotation(item.rotation()); new_item.setScale(item.scale())
+            new_item.setTransformOriginPoint(item.transformOriginPoint())
+            new_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+            new_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        return new_item
+
+    def _recreate_shape_item(self, shape):
+        stype = shape.get("type")
+        color = self.get_display_color(shape.get("color", self.current_color))
+        thickness = shape.get("thickness", self.current_thickness)
+        style = shape.get("style", self.current_style)
+        pen = QPen(color, thickness, style)
+        item = None
+
+        if stype == "image":
+            fpath = shape.get("file_path", "")
+            if fpath and os.path.exists(fpath):
+                pixmap = None
+                if fpath.lower().endswith('.pdf'):
+                    try:
+                        doc_pdf = pymupdf.open(fpath)
+                        pix = doc_pdf[0].get_pixmap(dpi=150)
+                        fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
+                        pixmap = QPixmap.fromImage(QImage(pix.samples, pix.width, pix.height, pix.stride, fmt))
+                    except Exception: pass
+                else:
+                    pixmap = QPixmap(fpath)
+
+                if pixmap and not pixmap.isNull():
+                    item = CustomPixmapItem(pixmap)
+                    pos_val = shape.get("pos", (0, 0))
+                    item.setPos(pos_val[0], pos_val[1])
+                    if "transform" in shape:
+                        m = shape["transform"]; item.setTransform(QTransform(m[0], m[1], m[2], m[3], m[4], m[5]))
+                    else:
+                        item.setScale(shape.get("scale", 1.0)); item.setRotation(shape.get("rotation", 0.0))
+                    item.setOpacity(shape.get("opacity", 1.0))
+                    if shape.get("layer") == "背景図面": item.setZValue(-100)
+                    self.scene.addItem(item); shape["item"] = item
+        elif stype == "line": item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen)
+        elif stype == "arrow": item = self.scene.addLine(shape["p1"][0], shape["p1"][1], shape["p2"][0], shape["p2"][1], pen); self._update_arrow_shape_graphics(shape)
+        elif stype == "rect": item = self.scene.addRect(min(shape["p1"][0], shape["p2"][0]), min(shape["p1"][1], shape["p2"][1]), abs(shape["p1"][0] - shape["p2"][0]), abs(shape["p1"][1] - shape["p2"][1]), pen)
+        elif stype == "circle": item = self.scene.addEllipse(shape["center"][0] - shape["radius"], shape["center"][1] - shape["radius"], 2 * shape["radius"], 2 * shape["radius"], pen)
+        elif stype == "arc":
+            path = QPainterPath(); path.arcMoveTo(shape["center"][0] - shape["radius"], shape["center"][1] - shape["radius"], 2 * shape["radius"], 2 * shape["radius"], shape["start_angle"])
+            path.arcTo(shape["center"][0] - shape["radius"], shape["center"][1] - shape["radius"], 2 * shape["radius"], 2 * shape["radius"], shape["start_angle"], shape["span_angle"])
+            item = self.scene.addPath(path, pen)
+        elif stype in ["polyline", "spline"]:
+            pts = [QPointF(pt[0], pt[1]) for pt in shape["points"]]
+            if shape.get("is_closed"): item = self.scene.addPolygon(pts, pen)
+            else:
+                path = QPainterPath(); path.moveTo(pts[0]); [path.lineTo(pt) for pt in pts[1:]]
+                item = self.scene.addPath(path, pen)
+        elif stype == "text":
+            item = self.scene.addText(shape["text"]); item.setDefaultTextColor(color)
+            font = QFont(shape.get("font_family", "Meiryo"), int(shape.get("font_size", 12)))
+            font.setBold(shape.get("bold", False)); font.setItalic(shape.get("italic", False))
+            item.setFont(font); item.setPos(*shape["pos"])
+        elif stype == "table":
+            self.add_table_data(shape.get("grid_data", [[""]]), shape.get("cell_w", 100), shape.get("cell_h", 30), QPointF(*shape.get("pos", (0, 0))), align=shape.get("align", "CENTER"), font_size=shape.get("font_size", 12), color=shape.get("color", self.current_color), target_shape=shape)
+            return shape.get("item")
+
+        if item:
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        return item
 
     # --- 右クリックコンテキストメニュー ---
     def contextMenuEvent(self, event):
